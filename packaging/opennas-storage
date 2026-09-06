@@ -1,0 +1,447 @@
+#!/bin/sh
+# Privileged disk helper for OpenNAS, invoked via doas by the unprivileged
+# backend. Initializes a BLANK disk into a data volume. Refuses to touch a disk
+# that is mounted or part of the system. Installed to /usr/lib/opennas/.
+set -eu
+
+partname() { case "$1" in *[0-9]) echo "${1}p1";; *) echo "${1}1";; esac; }
+
+# ---- Per-share quotas ------------------------------------------------------
+#
+# Implemented with *project* quotas, which is the only kind that means anything
+# here. Per-user quotas would not: Samba maps every connection to the single
+# `opennas` service account (see `force user` in smb.conf), so every byte any
+# person wrote would be charged to the same user.
+#
+# ext4 and xfs both support project quotas; btrfs does not have an equivalent
+# for a plain directory (its qgroups need each share to be its own subvolume),
+# so it is reported as unsupported rather than silently doing nothing.
+
+# Replace any fstab entry for this mountpoint, then add ours.
+#
+# Matching on the UUID was wrong: re-initialising a disk gives the filesystem a
+# *new* UUID, so the old line for the same mountpoint stayed behind and `mount
+# <mnt>` picked the dead one - leaving a freshly created volume unmountable, at
+# the next boot if not immediately.
+fstab_set() {
+	_mnt="$1"; _uuid="$2"; _fstype="$3"
+	if [ -f /etc/fstab ]; then
+		awk -v mnt="$_mnt" '$2 != mnt' /etc/fstab > /etc/fstab.new && cat /etc/fstab.new > /etc/fstab
+		rm -f /etc/fstab.new
+	fi
+	echo "UUID=$_uuid  $_mnt  $_fstype  rw,relatime  0 2" >> /etc/fstab
+}
+
+quota_mnt() {
+	label="$1"
+	case "$label" in ""|*[!a-zA-Z0-9_-]*) echo "invalid label" >&2; exit 1;; esac
+	printf '/var/lib/opennas/volumes/%s' "$label"
+}
+
+quota_fstype() { findmnt -no FSTYPE "$1" 2>/dev/null || true; }
+
+# Is the filesystem mounted with project quotas active?
+quota_active() {
+	mnt="$1"; fs="$2"
+	case "$fs" in
+	ext4) findmnt -no OPTIONS "$mnt" 2>/dev/null | grep -q 'prjquota' ;;
+	xfs)  findmnt -no OPTIONS "$mnt" 2>/dev/null | grep -qE 'prjquota|pquota' ;;
+	*) return 1 ;;
+	esac
+}
+
+case "${1:-}" in
+init)
+	disk="${2:?disk}"; fstype="${3:?fstype}"; label="${4:?label}"
+	case "$disk" in /dev/*) ;; *) echo "invalid disk path" >&2; exit 1;; esac
+	case "$label" in ""|*[!a-zA-Z0-9_-]*) echo "invalid label" >&2; exit 1;; esac
+	case "$fstype" in ext4|btrfs|xfs) ;; *) echo "invalid filesystem" >&2; exit 1;; esac
+	[ -b "$disk" ] || { echo "not a block device: $disk" >&2; exit 1; }
+	# Safety: never touch a disk that has anything mounted.
+	if lsblk -nro MOUNTPOINT "$disk" | grep -q .; then
+		echo "disk is in use (something on it is mounted)" >&2; exit 1
+	fi
+
+	wipefs -aq "$disk"
+	sfdisk "$disk" <<SFD
+label: gpt
+type=linux
+SFD
+	command -v partprobe >/dev/null 2>&1 && partprobe "$disk" 2>/dev/null || true
+	command -v mdev >/dev/null 2>&1 && mdev -s 2>/dev/null || true
+	sleep 1
+
+	part="$(partname "$disk")"
+	case "$fstype" in
+		ext4)  mkfs.ext4 -F -L "$label" "$part" ;;
+		btrfs) mkfs.btrfs -f -L "$label" "$part" ;;
+		xfs)   mkfs.xfs -f -L "$label" "$part" ;;
+	esac
+
+	mnt="/var/lib/opennas/volumes/$label"
+	mkdir -p "$mnt"
+	uuid="$(blkid -s UUID -o value "$part")"
+	[ -n "$uuid" ] || { echo "could not read new filesystem UUID" >&2; exit 1; }
+	fstab_set "$mnt" "$uuid" "$fstype"
+	mount "$mnt"
+	chown opennas:opennas "$mnt" 2>/dev/null || true
+	echo "initialized $disk -> $mnt ($fstype)"
+	;;
+freespace)
+	# freespace <disk> - bytes of unallocated space, for the Storage dashboard.
+	disk="${2:?disk}"
+	case "$disk" in /dev/*) ;; *) echo "invalid disk path" >&2; exit 1;; esac
+	[ -b "$disk" ] || { echo "not a block device: $disk" >&2; exit 1; }
+	# sfdisk's header line reads: "Unpartitioned space /dev/sda: 95.5 GiB, 102540230144 bytes, ..."
+	sfdisk -F "$disk" 2>/dev/null | sed -n 's/^Unpartitioned space.*, \([0-9][0-9]*\) bytes,.*/\1/p' | head -n1
+	;;
+
+init-free)
+	# init-free <disk> <fstype> <label> [size] - claim UNALLOCATED space on a disk
+	# as a new data volume, leaving every existing partition alone.
+	#
+	# This is what makes a single-disk box useful: the OS disk already has the
+	# system on it, so `init` (which wipes) can never be used, but the free space
+	# after the system partition is exactly where the shares should go.
+	#
+	# Safety rests on `sfdisk --append`, which only ever allocates from space no
+	# partition claims - it cannot move, resize or overwrite an existing one. The
+	# checks below are about refusing pointless or dangerous *requests*; the append
+	# itself is what guarantees existing data is untouched.
+	disk="${2:?disk}"; fstype="${3:?fstype}"; label="${4:?label}"; size="${5:-}"
+	case "$disk" in /dev/*) ;; *) echo "invalid disk path" >&2; exit 1;; esac
+	case "$label" in ""|*[!a-zA-Z0-9_-]*) echo "invalid label" >&2; exit 1;; esac
+	case "$fstype" in ext4|btrfs|xfs) ;; *) echo "invalid filesystem" >&2; exit 1;; esac
+	case "$size" in ""|*[0-9][GMgm]) ;; *) echo "invalid size (use e.g. 500G)" >&2; exit 1;; esac
+	[ -b "$disk" ] || { echo "not a block device: $disk" >&2; exit 1; }
+	[ -e "/var/lib/opennas/volumes/$label" ] && { echo "a volume named '$label' already exists" >&2; exit 1; }
+
+	# A partition table must already exist - appending to a raw disk would mean
+	# creating one, and that belongs to `init`, which asks for confirmation first.
+	sfdisk -d "$disk" >/dev/null 2>&1 || { echo "$disk has no partition table; use Initialize instead" >&2; exit 1; }
+
+	free=$(sfdisk -F "$disk" 2>/dev/null | sed -n 's/^Unpartitioned space.*, \([0-9][0-9]*\) bytes,.*/\1/p' | head -n1)
+	[ -n "$free" ] || free=0
+	# Below a gigabyte there is nothing worth mounting, and it's usually just GPT
+	# alignment slack rather than space anyone intended to leave.
+	if [ "$free" -lt 1073741824 ]; then
+		echo "not enough unallocated space on $disk ($free bytes)" >&2; exit 1
+	fi
+
+	# Remember what exists, so the new partition can be identified afterwards
+	# rather than guessed from a numbering assumption.
+	before=$(sfdisk -d "$disk" 2>/dev/null | sed -n 's/^\([^ ]*\) *:.*/\1/p' | sort)
+	if [ -n "$size" ]; then
+		echo "size=$size, type=linux" | sfdisk --append --force "$disk" >/dev/null 2>&1 \
+			|| { echo "could not create the partition" >&2; exit 1; }
+	else
+		echo "type=linux" | sfdisk --append --force "$disk" >/dev/null 2>&1 \
+			|| { echo "could not create the partition" >&2; exit 1; }
+	fi
+	command -v partprobe >/dev/null 2>&1 && partprobe "$disk" 2>/dev/null || true
+	command -v mdev >/dev/null 2>&1 && mdev -s 2>/dev/null || true
+	sleep 1
+
+	after=$(sfdisk -d "$disk" 2>/dev/null | sed -n 's/^\([^ ]*\) *:.*/\1/p' | sort)
+	# The new partition is the one name that appears in `after` but not `before`.
+	# Listing `before` twice makes every pre-existing name occur three times, so
+	# `uniq -u` leaves exactly the newcomer - no assumption about numbering, which
+	# matters because a disk can have gaps (p1,p2,p5) or nvme-style names.
+	part=$(printf '%s\n' "$before" "$before" "$after" | sort | uniq -u | head -n1)
+	[ -n "$part" ] && [ -b "$part" ] || { echo "could not find the new partition" >&2; exit 1; }
+
+	case "$fstype" in
+		ext4)  mkfs.ext4 -F -L "$label" "$part" ;;
+		btrfs) mkfs.btrfs -f -L "$label" "$part" ;;
+		xfs)   mkfs.xfs -f -L "$label" "$part" ;;
+	esac
+
+	mnt="/var/lib/opennas/volumes/$label"
+	mkdir -p "$mnt"
+	uuid="$(blkid -s UUID -o value "$part")"
+	[ -n "$uuid" ] || { echo "could not read new filesystem UUID" >&2; exit 1; }
+	fstab_set "$mnt" "$uuid" "$fstype"
+	mount "$mnt"
+	chown opennas:opennas "$mnt" 2>/dev/null || true
+	echo "created $part -> $mnt ($fstype)"
+	;;
+
+quota-status)
+	label="${2:?label}"; mnt="$(quota_mnt "$label")"
+	fs="$(quota_fstype "$mnt")"
+	supported=no; active=no; reason=""
+	case "$fs" in
+	ext4|xfs) supported=yes ;;
+	btrfs) reason="btrfs needs each share to be its own subvolume for a quota; OpenNAS creates plain directories" ;;
+	"") reason="that volume is not mounted" ;;
+	*) reason="$fs does not support project quotas" ;;
+	esac
+	if [ "$supported" = yes ] && quota_active "$mnt" "$fs"; then active=yes; fi
+	[ "$supported" = yes ] || [ -n "$reason" ] || reason="unsupported filesystem"
+	printf 'fstype=%s\nsupported=%s\nactive=%s\nreason=%s\n' "$fs" "$supported" "$active" "$reason"
+	;;
+
+# Turn project quotas on for a volume: add the mount option, remount, enable.
+quota-enable)
+	label="${2:?label}"; mnt="$(quota_mnt "$label")"
+	fs="$(quota_fstype "$mnt")"
+	case "$fs" in
+	ext4|xfs) ;;
+	*) echo "project quotas are not supported on ${fs:-that volume}" >&2; exit 1;;
+	esac
+	if quota_active "$mnt" "$fs"; then echo "already enabled"; exit 0; fi
+
+	# Persist the option first, so a reboot doesn't quietly lose it.
+	opt=prjquota
+	[ "$fs" = xfs ] && opt=pquota
+	awk -v mnt="$mnt" -v opt="$opt" '\
+		$2 == mnt && $4 !~ opt { $4 = $4 "," opt } { print }' /etc/fstab > /etc/fstab.new \
+		&& cat /etc/fstab.new > /etc/fstab && rm -f /etc/fstab.new
+
+	if [ "$fs" = ext4 ]; then
+		# ext4 needs the feature on the filesystem itself, which needs it
+		# unmounted; tune2fs refuses otherwise.
+		src="$(findmnt -no SOURCE "$mnt")"
+		umount "$mnt" || { echo "could not unmount $mnt to enable quotas - close anything using it" >&2; exit 1; }
+		tune2fs -O project,quota -Q prjquota "$src" >/dev/null 2>&1 || {
+			mount "$mnt" 2>/dev/null || true
+			echo "could not enable the project feature on $src" >&2; exit 1; }
+		mount "$mnt"
+		quotaon -P "$mnt" 2>/dev/null || true
+	else
+		# xfs enables project quotas at mount time.
+		umount "$mnt" && mount "$mnt" || { echo "could not remount $mnt" >&2; exit 1; }
+	fi
+	quota_active "$mnt" "$fs" || { echo "quotas did not come up after remounting" >&2; exit 1; }
+	echo "enabled"
+	;;
+
+# Assign a project id to a share directory and cap it. bytes=0 removes the cap.
+quota-set)
+	label="${2:?label}"; share="${3:?share}"; projid="${4:?projid}"; bytes="${5:?bytes}"
+	case "$share" in ""|*[!a-zA-Z0-9_-]*) echo "invalid share name" >&2; exit 1;; esac
+	case "$projid" in ""|*[!0-9]*) echo "invalid project id" >&2; exit 1;; esac
+	case "$bytes" in ""|*[!0-9]*) echo "invalid size" >&2; exit 1;; esac
+	mnt="$(quota_mnt "$label")"; dir="$mnt/$share"
+	fs="$(quota_fstype "$mnt")"
+	[ -d "$dir" ] || { echo "no such share directory" >&2; exit 1; }
+	quota_active "$mnt" "$fs" || { echo "project quotas are not enabled on that volume" >&2; exit 1; }
+
+	# Tag the tree, and set the inherit flag so new files join the project.
+	chattr -R -p "$projid" "$dir" >/dev/null 2>&1 || { echo "could not set the project id" >&2; exit 1; }
+	chattr -R +P "$dir" >/dev/null 2>&1 || true
+
+	kib=$(( bytes / 1024 ))
+	if [ "$fs" = xfs ]; then
+		xfs_quota -x -c "limit -p bhard=${kib}k bsoft=${kib}k $projid" "$mnt" >/dev/null || {
+			echo "could not apply the limit" >&2; exit 1; }
+	else
+		setquota -P "$projid" "$kib" "$kib" 0 0 "$mnt" || { echo "could not apply the limit" >&2; exit 1; }
+	fi
+	echo "set $share $bytes"
+	;;
+
+# Usage + limit for one project id, in bytes. Prints used=N limit=N.
+quota-get)
+	label="${2:?label}"; projid="${3:?projid}"
+	case "$projid" in ""|*[!0-9]*) echo "invalid project id" >&2; exit 1;; esac
+	mnt="$(quota_mnt "$label")"; fs="$(quota_fstype "$mnt")"
+	used=0; limit=0
+	if quota_active "$mnt" "$fs"; then
+		if [ "$fs" = xfs ]; then
+			line="$(xfs_quota -x -c "report -p -N -b" "$mnt" 2>/dev/null | awk -v id="#$projid" '$1 == id {print; exit}')"
+			used=$(echo "$line"  | awk '{print $2}')
+			limit=$(echo "$line" | awk '{print $4}')
+		else
+			# repquota -O csv columns are:
+			#   Project,BlockStatus,FileStatus,BlockUsed,BlockSoftLimit,BlockHardLimit,...
+			# and the project is printed with a leading "#".
+			line="$(repquota -P -O csv "$mnt" 2>/dev/null | awk -F, -v id="#$projid" '$1 == id {print; exit}')"
+			used=$(echo "$line"  | awk -F, '{print $4}')
+			limit=$(echo "$line" | awk -F, '{print $6}')
+		fi
+	fi
+	case "$used"  in ""|*[!0-9]*) used=0 ;;  esac
+	case "$limit" in ""|*[!0-9]*) limit=0 ;; esac
+	printf 'used=%s\nlimit=%s\n' "$(( used * 1024 ))" "$(( limit * 1024 ))"
+	;;
+
+mount|unmount|erase)
+	op="$1"; label="${2:?label}"
+	case "$label" in ""|*[!a-zA-Z0-9_-]*) echo "invalid label" >&2; exit 1;; esac
+	mnt="/var/lib/opennas/volumes/$label"
+	case "$op" in
+	mount)
+		mkdir -p "$mnt"
+		mount "$mnt" 2>/dev/null || mount -L "$label" "$mnt"
+		;;
+	unmount)
+		umount "$mnt"
+		;;
+	erase)
+		src="$(findmnt -no SOURCE "$mnt" 2>/dev/null || true)"
+		umount "$mnt" 2>/dev/null || true
+		[ -n "$src" ] || src="$(blkid -L "$label" 2>/dev/null || true)"
+		[ -n "$src" ] && wipefs -aq "$src" || true
+		sed -i "\\#${mnt}#d" /etc/fstab 2>/dev/null || true
+		rmdir "$mnt" 2>/dev/null || true
+		;;
+	esac
+	echo "$op $label ok"
+	;;
+
+raid-create)
+	# raid-create <level> <label> <fstype> <disk1> <disk2> [disk3 ...]
+	level="${2:?level}"; label="${3:?label}"; fstype="${4:?fstype}"; shift 4
+	case "$level" in raid0|raid1|raid5|raid6|raid10) ;; *) echo "invalid level" >&2; exit 1;; esac
+	case "$label" in ""|*[!a-zA-Z0-9_-]*) echo "invalid label" >&2; exit 1;; esac
+	case "$fstype" in ext4|btrfs|xfs) ;; *) echo "invalid filesystem" >&2; exit 1;; esac
+	[ "$#" -ge 2 ] || { echo "need at least two disks" >&2; exit 1; }
+	n="$#"
+	case "$level" in
+		raid5)  [ "$n" -ge 3 ] || { echo "raid5 needs >=3 disks" >&2; exit 1; } ;;
+		raid6)  [ "$n" -ge 4 ] || { echo "raid6 needs >=4 disks" >&2; exit 1; } ;;
+		raid10) [ "$n" -ge 4 ] || { echo "raid10 needs >=4 disks" >&2; exit 1; } ;;
+	esac
+	# Validate every member: real block device, nothing mounted on it.
+	for d in "$@"; do
+		case "$d" in /dev/*) ;; *) echo "invalid disk path: $d" >&2; exit 1;; esac
+		[ -b "$d" ] || { echo "not a block device: $d" >&2; exit 1; }
+		if lsblk -nro MOUNTPOINT "$d" | grep -q .; then echo "disk in use: $d" >&2; exit 1; fi
+	done
+	# Pick the first free /dev/mdN.
+	md=""
+	for i in 0 1 2 3 4 5 6 7 8 9; do [ -e "/dev/md$i" ] || { md="/dev/md$i"; break; }; done
+	[ -n "$md" ] || { echo "no free md device" >&2; exit 1; }
+	# DESTRUCTIVE: clear any old signatures, then build the array.
+	for d in "$@"; do wipefs -aq "$d"; done
+	yes | mdadm --create "$md" --level="$level" --raid-devices="$n" --metadata=1.2 --run "$@" >/dev/null 2>&1 \
+		|| { echo "mdadm create failed" >&2; exit 1; }
+	# Persist so the array assembles on boot.
+	touch /etc/mdadm.conf
+	line="$(mdadm --detail --brief "$md" 2>/dev/null)"
+	[ -n "$line" ] && ! grep -qF "$line" /etc/mdadm.conf && echo "$line" >> /etc/mdadm.conf
+	# Format + mount the array as a data volume (resync continues in the background).
+	case "$fstype" in
+		ext4)  mkfs.ext4 -F -L "$label" "$md" ;;
+		btrfs) mkfs.btrfs -f -L "$label" "$md" ;;
+		xfs)   mkfs.xfs -f -L "$label" "$md" ;;
+	esac
+	mnt="/var/lib/opennas/volumes/$label"
+	mkdir -p "$mnt"
+	uuid="$(blkid -s UUID -o value "$md")"
+	[ -n "$uuid" ] || { echo "could not read new filesystem UUID" >&2; exit 1; }
+	fstab_set "$mnt" "$uuid" "$fstype"
+	mount "$mnt"
+	chown opennas:opennas "$mnt" 2>/dev/null || true
+	echo "created $md ($level, $n disks) -> $mnt"
+	;;
+raid-destroy)
+	# raid-destroy <mdName>  e.g. md0
+	md="${2:?md}"
+	case "$md" in md[0-9]*) md="/dev/$md";; /dev/md[0-9]*) ;; *) echo "invalid md device" >&2; exit 1;; esac
+	[ -e "$md" ] || { echo "no such array: $md" >&2; exit 1; }
+	mnt="$(findmnt -no TARGET "$md" 2>/dev/null || true)"
+	case "$mnt" in /|/boot|/boot/efi) echo "refusing to destroy a system array" >&2; exit 1;; esac
+	members="$(mdadm --detail --export "$md" 2>/dev/null | sed -n 's/^MD_DEVICE_[^=]*_DEV=//p')"
+	[ -n "$mnt" ] && umount "$mnt" 2>/dev/null || true
+	mdadm --stop "$md" 2>/dev/null || true
+	for m in $members; do mdadm --zero-superblock "$m" 2>/dev/null || true; done
+	sed -i "\\#${md}#d" /etc/mdadm.conf 2>/dev/null || true
+	if [ -n "$mnt" ]; then
+		sed -i "\\#${mnt}#d" /etc/fstab 2>/dev/null || true
+		rmdir "$mnt" 2>/dev/null || true
+	fi
+	echo "destroyed $md"
+	;;
+
+raid-add)
+	# raid-add <mdN> <disk> - add a blank disk: rebuilds a degraded array or adds a spare.
+	md="${2:?md}"; disk="${3:?disk}"
+	case "$md" in md[0-9]*) md="/dev/$md";; /dev/md[0-9]*) ;; *) echo "invalid md device" >&2; exit 1;; esac
+	case "$disk" in /dev/*) ;; *) echo "invalid disk path" >&2; exit 1;; esac
+	[ -e "$md" ] || { echo "no such array: $md" >&2; exit 1; }
+	[ -b "$disk" ] || { echo "not a block device: $disk" >&2; exit 1; }
+	if lsblk -nro MOUNTPOINT "$disk" | grep -q .; then echo "disk in use: $disk" >&2; exit 1; fi
+	wipefs -aq "$disk"
+	mdadm --add "$md" "$disk" >/dev/null 2>&1 || { echo "mdadm add failed" >&2; exit 1; }
+	echo "added $disk to $md"
+	;;
+raid-remove)
+	# raid-remove <mdN> <member> - fail (if active) then remove a member, and wipe it.
+	# mdadm refuses to fail the last working device, so an array can't be killed here.
+	md="${2:?md}"; disk="${3:?disk}"
+	case "$md" in md[0-9]*) md="/dev/$md";; /dev/md[0-9]*) ;; *) echo "invalid md device" >&2; exit 1;; esac
+	case "$disk" in /dev/*) ;; *) echo "invalid disk path" >&2; exit 1;; esac
+	[ -e "$md" ] || { echo "no such array: $md" >&2; exit 1; }
+	mdadm "$md" --fail "$disk" 2>/dev/null || true
+	mdadm "$md" --remove "$disk" >/dev/null 2>&1 || { echo "mdadm remove failed" >&2; exit 1; }
+	mdadm --zero-superblock "$disk" 2>/dev/null || true
+	echo "removed $disk from $md"
+	;;
+
+scrub)
+	# scrub <label> - online consistency check of a data volume.
+	#
+	# Only filesystems that have a real online check are offered one. ext4 has
+	# none: fsck on a mounted filesystem reports damage it then can't repair, and
+	# running it anyway is how people corrupt a working array. Saying so is more
+	# use than pretending to check.
+	mnt="$(quota_mnt "${2:?label}")"
+	fs="$(quota_fstype "$mnt")"
+	[ -n "$fs" ] || { echo "that volume is not mounted" >&2; exit 1; }
+	# The per-filesystem tools live in the installer's tolerant package loop, so
+	# one of them being absent is a real possibility on a trimmed-down box. Say
+	# which tool is missing rather than letting the shell's "not found" surface
+	# as the scrub result.
+	need() { command -v "$1" >/dev/null 2>&1 || { echo "$1 is not installed, so a $fs volume can't be scrubbed here" >&2; exit 1; }; }
+	case "$fs" in
+	btrfs)
+		need btrfs
+		# Foreground so the exit status means something; the caller runs it in
+		# the background and records the result.
+		btrfs scrub start -B -d "$mnt" 2>&1
+		;;
+	xfs)
+		need xfs_scrub
+		xfs_scrub -n "$mnt" 2>&1
+		;;
+	zfs)
+		need zfs
+		pool="$(zfs list -Ho name "$mnt" 2>/dev/null | cut -d/ -f1)"
+		[ -n "$pool" ] || { echo "could not find the pool for $mnt" >&2; exit 1; }
+		zpool scrub -w "$pool" 2>&1
+		;;
+	*)
+		echo "$fs has no online consistency check; ext4 can only be checked while unmounted" >&2
+		exit 1
+		;;
+	esac
+	;;
+
+trim)
+	# trim <label> - release unused blocks back to an SSD.
+	mnt="$(quota_mnt "${2:?label}")"
+	findmnt -no TARGET "$mnt" >/dev/null 2>&1 || { echo "that volume is not mounted" >&2; exit 1; }
+	command -v fstrim >/dev/null 2>&1 || { echo "fstrim is not installed" >&2; exit 1; }
+	fstrim -v "$mnt" 2>&1
+	;;
+
+smart-test)
+	# smart-test <disk> <short|long> - start a SMART self-test.
+	#
+	# The drive runs it itself in the background, so this returns as soon as it
+	# is accepted; results are read back with the usual SMART query.
+	disk="${2:?disk}"; kind="${3:-short}"
+	case "$disk" in /dev/*) ;; *) echo "invalid disk path" >&2; exit 1;; esac
+	[ -b "$disk" ] || { echo "no such disk: $disk" >&2; exit 1; }
+	case "$kind" in short|long) ;; *) echo "invalid test type" >&2; exit 1;; esac
+	command -v smartctl >/dev/null 2>&1 || { echo "smartmontools is not installed" >&2; exit 1; }
+	smartctl -t "$kind" "$disk" 2>&1
+	;;
+
+*)
+	echo "usage: opennas-storage {init|init-free|freespace|mount|unmount|erase|raid-create|raid-destroy|raid-add|raid-remove|scrub|trim|smart-test} ..." >&2
+	exit 1
+	;;
+esac

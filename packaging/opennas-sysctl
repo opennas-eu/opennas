@@ -1,0 +1,104 @@
+#!/bin/sh
+# Privileged system-config helper for OpenNAS, invoked via doas by the
+# unprivileged backend. Scoped to a fixed set of subcommands. Installed to
+# /usr/lib/opennas/.
+set -eu
+
+valid_host() { case "$1" in ""|*[!a-zA-Z0-9.-]*) return 1;; *) return 0;; esac; }
+valid_word() { case "$1" in ""|*[!a-zA-Z0-9._/:+-]*) return 1;; *) return 0;; esac; }
+valid_ip()   { case "$1" in ""|*[!0-9.]*) return 1;; *) return 0;; esac; }
+
+case "${1:-}" in
+hostname)
+	name="${2:?}"; valid_host "$name" || { echo "invalid hostname" >&2; exit 1; }
+	echo "$name" > /etc/hostname
+	hostname "$name"
+	;;
+
+iface)
+	dev="${2:?}"; mode="${3:?}"
+	case "$dev" in ""|*[!a-zA-Z0-9]*) echo "invalid interface" >&2; exit 1;; esac
+	{
+		echo "auto lo"
+		echo "iface lo inet loopback"
+		echo ""
+		echo "auto $dev"
+		if [ "$mode" = "static" ]; then
+			ip="${4:?}"; cidr="${5:?}"; gw="${6:-}"; dns="${7:-}"
+			valid_ip "$ip" && valid_ip "$gw" || { echo "invalid IP" >&2; exit 1; }
+			case "$cidr" in ""|*[!0-9]*) echo "invalid prefix" >&2; exit 1;; esac
+			echo "iface $dev inet static"
+			echo "    address $ip/$cidr"
+			[ -n "$gw" ] && echo "    gateway $gw"
+			[ -n "$dns" ] && echo "nameserver $dns" > /etc/resolv.conf
+		else
+			echo "iface $dev inet dhcp"
+		fi
+	} > /etc/network/interfaces
+	rc-service networking restart >/dev/null 2>&1 || true
+	;;
+
+timezone)
+	tz="${2:?}"; valid_word "$tz" || { echo "invalid timezone" >&2; exit 1; }
+	[ -f "/usr/share/zoneinfo/$tz" ] || { echo "unknown timezone" >&2; exit 1; }
+	# Deliberately NOT setup-timezone. Alpine's helper unconditionally tries to
+	# `apk add tzdata` first, and on an appliance with no route to a mirror that
+	# fails - *after* it has already removed /etc/localtime, leaving the box with
+	# no timezone at all. Copying the zone file is offline, deterministic, and
+	# cannot half-succeed.
+	cp "/usr/share/zoneinfo/$tz" /etc/localtime
+	echo "$tz" > /etc/timezone
+	;;
+
+ntp)
+	server="${2:?}"; valid_host "$server" || { echo "invalid NTP server" >&2; exit 1; }
+	conf=/etc/chrony/chrony.conf
+	[ -f "$conf" ] || conf=/etc/chrony.conf
+	# If chrony isn't installed there is no config to edit, and quietly doing
+	# nothing here reported success to the UI while the clock kept drifting.
+	# Say so instead: a NAS with the wrong time breaks TLS, SMB and every log.
+	if [ ! -f "$conf" ]; then
+		echo "chrony is not installed - cannot configure time synchronisation" >&2
+		exit 1
+	fi
+	sed -i '/^server /d; /^pool /d' "$conf"
+	echo "server $server iburst" >> "$conf"
+	rc-update add chronyd default >/dev/null 2>&1 || true
+	rc-service chronyd restart >/dev/null 2>&1 || true
+	;;
+
+update)
+	apk update && apk upgrade --no-interactive
+	;;
+
+ssh)
+	op="${2:?}"
+	case "$op" in
+	enable)
+		rc-update add sshd default 2>/dev/null || true
+		rc-service sshd start
+		;;
+	disable)
+		rc-service sshd stop 2>/dev/null || true
+		rc-update del sshd default 2>/dev/null || true
+		;;
+	keys)
+		user="${3:?}"
+		case "$user" in ""|root|*[!a-z0-9_-]*) echo "invalid user" >&2; exit 1;; esac
+		home=$(getent passwd "$user" | cut -d: -f6)
+		[ -n "$home" ] && [ -d "$home" ] || { echo "no such user" >&2; exit 1; }
+		install -d -m 0700 -o "$user" -g "$user" "$home/.ssh"
+		# Authorized keys arrive on stdin (one per line).
+		cat > "$home/.ssh/authorized_keys"
+		chown "$user:$user" "$home/.ssh/authorized_keys"
+		chmod 0600 "$home/.ssh/authorized_keys"
+		;;
+	*) echo "usage: opennas-sysctl ssh {enable|disable|keys <user>}" >&2; exit 1 ;;
+	esac
+	;;
+
+*)
+	echo "usage: opennas-sysctl {hostname|iface|timezone|ntp|update|ssh} ..." >&2
+	exit 1
+	;;
+esac

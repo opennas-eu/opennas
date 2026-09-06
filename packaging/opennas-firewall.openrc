@@ -1,0 +1,37 @@
+#!/sbin/openrc-run
+# Loads the OpenNAS firewall ruleset at boot.
+#
+# Deliberately separate from Alpine's own `nftables` service. That service
+# loads /etc/nftables.nft, which ships a default-drop `inet filter` table - so
+# enabling it to persist our rules also enabled a second, stricter ruleset that
+# stayed behind after the OpenNAS firewall was switched off, and the machine
+# came back from its next reboot refusing every connection.
+#
+# This service owns exactly one table and nothing else.
+
+description="OpenNAS firewall"
+RULES=/etc/opennas/firewall.nft
+
+depend() {
+	need net
+	before opennas nginx sshd samba nfs
+}
+
+start() {
+	[ -f "$RULES" ] || return 0
+	ebegin "Loading the OpenNAS firewall ruleset"
+	# Validate before loading: a bad ruleset at boot would be unrecoverable
+	# without physical access.
+	if ! nft -c -f "$RULES" 2>/dev/null; then
+		eend 1 "ruleset failed validation - not loading it"
+		return 1
+	fi
+	nft -f "$RULES"
+	eend $?
+}
+
+stop() {
+	ebegin "Removing the OpenNAS firewall ruleset"
+	nft delete table inet opennas 2>/dev/null
+	eend 0
+}

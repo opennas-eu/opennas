@@ -1,0 +1,408 @@
+#!/bin/sh
+# Privileged ZFS helper for OpenNAS, invoked through doas by the unprivileged
+# backend, which allow-lists this exact path.
+#
+#   opennas-zfs status
+#   opennas-zfs pools
+#   opennas-zfs pool-status <pool>
+#   opennas-zfs pool-create <pool> <layout> <disk> [disk ...]
+#   opennas-zfs pool-destroy <pool>
+#   opennas-zfs pool-export <pool>
+#   opennas-zfs pool-import [pool]
+#   opennas-zfs importable
+#   opennas-zfs scrub <pool> [stop]
+#   opennas-zfs datasets [pool]
+#   opennas-zfs dataset-create <pool/name>
+#   opennas-zfs dataset-destroy <pool/name>
+#   opennas-zfs dataset-quota <pool/name> <bytes|none>
+#   opennas-zfs snapshots [dataset]
+#   opennas-zfs snapshot-create <dataset> <name>
+#   opennas-zfs snapshot-destroy <dataset@name>
+#   opennas-zfs rollback <dataset@name>
+#
+# ## Why a separate helper
+#
+# `opennas-storage` deals in partitions, mdadm and filesystems. ZFS is its own
+# world - it owns whole disks, does its own redundancy, and its own volume
+# management - and mixing the two would mean one script where half the commands
+# are meaningless for whatever you happen to be holding. It also gets its own
+# doas rule, so a machine with no ZFS simply never grants it.
+#
+# ## The rule this script exists to enforce
+#
+# Everything here either reads, or destroys data. `zpool create` on the wrong
+# device is unrecoverable and takes no longer than on the right one, so every
+# destructive path re-checks its arguments here rather than trusting that the
+# backend checked them: the backend is reachable from the network and this is
+# not.
+set -eu
+
+VOLROOT=/var/lib/opennas/volumes
+
+# ---- Validation ------------------------------------------------------------
+#
+# Names reach `zpool`/`zfs` as arguments and become directory names under
+# VOLROOT. ZFS itself accepts a wider set than this, but a pool called `../etc`
+# or one with a space in it buys nobody anything and costs a class of bug.
+
+valid_name() {
+	case "$1" in
+		""|*[!a-zA-Z0-9_.-]*) return 1 ;;
+		-*|.*) return 1 ;;   # a leading dash is an option; a leading dot is hidden
+		*) return 0 ;;
+	esac
+}
+
+# A dataset path: pool/child/grandchild, each component name-valid.
+valid_dataset() {
+	_ds="$1"
+	case "$_ds" in */) return 1 ;; esac
+	_rest="$_ds"
+	while [ -n "$_rest" ]; do
+		_head="${_rest%%/*}"
+		valid_name "$_head" || return 1
+		case "$_rest" in *"/"*) _rest="${_rest#*/}" ;; *) _rest="" ;; esac
+	done
+	return 0
+}
+
+die() { echo "$*" >&2; exit 1; }
+
+need_zfs() {
+	command -v zpool >/dev/null 2>&1 || die "ZFS isn't installed on this system."
+	# The userland installs happily without the kernel module, and then every
+	# command fails with the same unhelpful message. Say it once, clearly.
+	zpool list >/dev/null 2>&1 || die "The ZFS kernel module isn't loaded - check that zfs-lts matches the running kernel."
+}
+
+# The pool holding the root filesystem, if OpenNAS is running from one. Never
+# destroyable, never exportable: doing either takes the machine down with no
+# console to fix it from.
+root_pool() {
+	_src="$(findmnt -no SOURCE / 2>/dev/null || true)"
+	case "$_src" in
+		"") echo "" ;;
+		/dev/*) echo "" ;;                 # an ordinary block device, not ZFS
+		*) [ "$(findmnt -no FSTYPE / 2>/dev/null)" = "zfs" ] && echo "${_src%%/*}" || echo "" ;;
+	esac
+}
+
+guard_pool() {
+	_p="$1"
+	valid_name "$_p" || die "invalid pool name"
+	[ "$_p" = "$(root_pool)" ] && die "refusing to touch the pool this system is running from"
+	return 0
+}
+
+# ---- Read-only -------------------------------------------------------------
+
+case "${1:-}" in
+status)
+	# Deliberately does not use need_zfs: reporting *that* ZFS is unusable is
+	# the whole job here, so it must answer rather than fail.
+	if ! command -v zpool >/dev/null 2>&1; then
+		echo "state=absent"
+		echo "reason=ZFS isn't installed on this system."
+		exit 0
+	fi
+	_ver="$(zfs version 2>/dev/null | head -1 | sed 's/^zfs-//')"
+	if ! zpool list >/dev/null 2>&1; then
+		echo "state=no-module"
+		echo "reason=ZFS is installed but its kernel module isn't loaded. After a kernel update, zfs-lts has to match the running kernel."
+		echo "version=${_ver:-unknown}"
+		exit 0
+	fi
+	echo "state=ready"
+	echo "version=${_ver:-unknown}"
+	# RAIDZ expansion arrived in OpenZFS 2.3. On anything older a raidz vdev
+	# cannot gain a disk, which is the single most surprising limitation for
+	# someone coming from mdadm - so the UI is told rather than left to guess.
+	_major="${_ver%%.*}"
+	_minor="$(echo "$_ver" | cut -d. -f2)"
+	if [ "${_major:-0}" -gt 2 ] 2>/dev/null || { [ "${_major:-0}" = 2 ] && [ "${_minor:-0}" -ge 3 ] 2>/dev/null; }; then
+		echo "raidzExpansion=yes"
+	else
+		echo "raidzExpansion=no"
+	fi
+	;;
+
+pools)
+	need_zfs
+	# -H: no header, tab-separated. -p: exact bytes rather than "3.62T".
+	zpool list -Hp -o name,size,alloc,free,health,fragmentation,capacity,dedupratio 2>/dev/null || true
+	;;
+
+pool-status)
+	need_zfs
+	_p="${2:?pool}"; valid_name "$_p" || die "invalid pool name"
+	# The human-readable tree. Parsed by the backend; kept verbatim so the
+	# vdev layout, the errors column and any resilver line all survive.
+	zpool status "$_p" 2>&1
+	;;
+
+importable)
+	need_zfs
+	# Pools present on disk but not currently imported - after a reinstall, or
+	# when disks move to another machine.
+	zpool import 2>/dev/null || true
+	;;
+
+datasets)
+	need_zfs
+	if [ -n "${2:-}" ]; then
+		valid_dataset "$2" || die "invalid dataset name"
+		zfs list -Hp -r -t filesystem -o name,used,available,quota,mountpoint,compression "$2" 2>/dev/null || true
+	else
+		zfs list -Hp -t filesystem -o name,used,available,quota,mountpoint,compression 2>/dev/null || true
+	fi
+	;;
+
+snapshots)
+	need_zfs
+	if [ -n "${2:-}" ]; then
+		valid_dataset "$2" || die "invalid dataset name"
+		zfs list -Hp -r -t snapshot -o name,used,creation,referenced "$2" 2>/dev/null || true
+	else
+		zfs list -Hp -t snapshot -o name,used,creation,referenced 2>/dev/null || true
+	fi
+	;;
+
+# ---- Destructive -----------------------------------------------------------
+
+pool-create)
+	# pool-create <pool> <layout> <disk> [disk ...]
+	need_zfs
+	pool="${2:?pool}"; layout="${3:?layout}"; shift 3
+	valid_name "$pool" || die "invalid pool name"
+	zpool list -H -o name 2>/dev/null | grep -qx "$pool" && die "a pool called '$pool' already exists"
+	[ -e "$VOLROOT/$pool" ] && die "something is already mounted at $VOLROOT/$pool"
+
+	case "$layout" in
+		stripe|mirror|raidz1|raidz2|raidz3) ;;
+		*) die "invalid layout" ;;
+	esac
+	n="$#"
+	[ "$n" -ge 1 ] || die "no disks given"
+	case "$layout" in
+		mirror) [ "$n" -ge 2 ] || die "a mirror needs at least 2 disks" ;;
+		raidz1) [ "$n" -ge 3 ] || die "raidz1 needs at least 3 disks" ;;
+		raidz2) [ "$n" -ge 4 ] || die "raidz2 needs at least 4 disks" ;;
+		raidz3) [ "$n" -ge 5 ] || die "raidz3 needs at least 5 disks" ;;
+	esac
+
+	# Every member: a real block device, nothing mounted anywhere beneath it,
+	# and not already claimed by another pool.
+	for d in "$@"; do
+		case "$d" in /dev/*) ;; *) die "invalid disk path: $d" ;; esac
+		[ -b "$d" ] || die "not a block device: $d"
+		if lsblk -nro MOUNTPOINT "$d" 2>/dev/null | grep -q .; then die "disk in use: $d"; fi
+	done
+
+	mkdir -p "$VOLROOT"
+
+	# Clear these disks, and make the kernel forget what used to be on them.
+	#
+	# Without this, creating a pool on disks that previously held one fails with
+	#
+	#     cannot label 'vdc': failed to detect device partitions on '/dev/vdc1': 19
+	#
+	# - ENODEV. `zpool create` writes a fresh GPT and immediately opens the
+	# partition it just made, while the kernel is still holding the *old*
+	# partition table. The first pool on blank disks works; the second, after a
+	# destroy, does not - which is exactly the commonest real action: rebuild a
+	# pool on the same drives after changing your mind about the layout.
+	#
+	# `wipefs` alone is not enough, and neither is `udevadm settle` - measured,
+	# both still failed. Wiping removes the signature from the *disk*; the stale
+	# partition nodes live in the kernel until it is told to re-read the table,
+	# and `zpool` races them. So: wipe, force a re-read, then actually wait for
+	# the old nodes to disappear rather than assuming a sleep was long enough.
+	for d in "$@"; do
+		wipefs -aq "$d" >/dev/null 2>&1 || true
+		partprobe "$d" >/dev/null 2>&1 || blockdev --rereadpt "$d" >/dev/null 2>&1 || true
+	done
+	command -v udevadm >/dev/null 2>&1 && udevadm settle --timeout=30 >/dev/null 2>&1 || true
+
+	_waited=0
+	while [ "$_waited" -lt 15 ]; do
+		_stale=""
+		for d in "$@"; do
+			# A whole-disk vdev is given partition 1 (data) and 9 (reserved).
+			[ -e "${d}1" ] || [ -e "${d}p1" ] && _stale=yes
+		done
+		[ -z "$_stale" ] && break
+		sleep 1
+		_waited=$((_waited + 1))
+	done
+	[ -n "${_stale:-}" ] && echo "note: old partitions on the selected disks are still present after ${_waited}s" >&2
+
+	# `stripe` is not a zpool keyword - bare devices *are* a stripe. Every other
+	# layout names itself.
+	if [ "$layout" = stripe ]; then set -- "$@"; else set -- "$layout" "$@"; fi
+
+	# ashift=12 forces 4K sectors: right for every modern drive, and a pool
+	# created with the wrong ashift cannot be changed afterwards without
+	# rebuilding it. compression is on because lz4 is faster than the disk it
+	# saves writes to, and atime is off because a NAS does not need to write on
+	# every read.
+	# zpool's own message is kept and passed back. "zpool create failed" on its
+	# own is useless to whoever is standing in front of the machine - the reason
+	# is always something specific and actionable ("device is in use", "no such
+	# device", "contains a filesystem"), and throwing it away turns a two-second
+	# fix into a support thread.
+	if ! out=$(zpool create -f \
+		-o ashift=12 \
+		-O compression=lz4 \
+		-O atime=off \
+		-O xattr=sa \
+		-O acltype=posixacl \
+		-m "$VOLROOT/$pool" \
+		"$pool" "$@" 2>&1); then
+		fail_msg=$(printf '%s' "$out" | tr '\n' ' ' | sed 's/  */ /g')
+		die "could not create the pool: ${fail_msg:-zpool gave no reason}"
+	fi
+
+	# A note on atime, because the code above asks for `atime=off` and the pool
+	# does not report it.
+	#
+	# Measured on Alpine with OpenZFS 2.2.11: after `zpool create -O atime=off`,
+	# `zfs get atime` reports `on (temporary)` with `relatime on (default)`. A
+	# temporary property comes from the mount and outranks the dataset one, so
+	# `zfs set atime=off` cannot clear it - and neither can a full unmount and
+	# remount, which was tried and returned success while changing nothing.
+	#
+	# It is left alone rather than fought, because the resulting behaviour is
+	# **relatime**, which is the right answer anyway: an access time is written
+	# at most once a day per file instead of on every read. The thing worth
+	# avoiding is `strictatime`, and relatime already avoids it. An earlier
+	# version of this comment claimed every read writes metadata; that is true of
+	# strictatime and not of what actually happens here.
+
+	# So the pool comes back after a reboot. zpool.cache plus the zfs-import
+	# service is what actually does it; this makes the intent explicit.
+	zpool set cachefile=/etc/zfs/zpool.cache "$pool" 2>/dev/null || true
+	chown opennas:opennas "$VOLROOT/$pool" 2>/dev/null || true
+	echo "created pool $pool ($layout, $n disks) -> $VOLROOT/$pool"
+	;;
+
+pool-destroy)
+	need_zfs
+	pool="${2:?pool}"; guard_pool "$pool"
+	zpool list -H -o name 2>/dev/null | grep -qx "$pool" || die "no such pool: $pool"
+	if ! out=$(zpool destroy -f "$pool" 2>&1); then die "could not destroy the pool: $(printf '%s' "$out" | tr '\n' ' ')"; fi
+	rmdir "$VOLROOT/$pool" 2>/dev/null || true
+	echo "destroyed pool $pool"
+	;;
+
+pool-export)
+	need_zfs
+	pool="${2:?pool}"; guard_pool "$pool"
+	if ! out=$(zpool export "$pool" 2>&1); then die "could not export the pool: $(printf '%s' "$out" | tr '\n' ' ')"; fi
+	echo "exported $pool"
+	;;
+
+pool-import)
+	need_zfs
+	if [ -n "${2:-}" ]; then
+		pool="$2"; valid_name "$pool" || die "invalid pool name"
+		mkdir -p "$VOLROOT"
+		zpool import -f -o cachefile=/etc/zfs/zpool.cache -R / "$pool" 2>&1 || die "zpool import failed"
+		echo "imported $pool"
+	else
+		zpool import -a -f -o cachefile=/etc/zfs/zpool.cache 2>&1 || true
+		echo "imported all available pools"
+	fi
+	;;
+
+scrub)
+	need_zfs
+	pool="${2:?pool}"; valid_name "$pool" || die "invalid pool name"
+	if [ "${3:-}" = stop ]; then
+		zpool scrub -s "$pool" 2>&1 || die "could not stop the scrub"
+		echo "stopped scrub on $pool"
+	else
+		# A scrub is the whole point of ZFS's checksums: it is what turns "the
+		# data is silently rotting" into "the data was rotting and got fixed".
+		zpool scrub "$pool" 2>&1 || die "could not start a scrub"
+		echo "started scrub on $pool"
+	fi
+	;;
+
+dataset-create)
+	need_zfs
+	ds="${2:?dataset}"; valid_dataset "$ds" || die "invalid dataset name"
+	guard_pool "${ds%%/*}"
+	case "$ds" in */*) ;; *) die "give a dataset inside a pool, like tank/photos" ;; esac
+	if ! out=$(zfs create -p "$ds" 2>&1); then die "could not create the dataset: $(printf '%s' "$out" | tr '\n' ' ')"; fi
+	_mnt="$(zfs get -H -o value mountpoint "$ds" 2>/dev/null || true)"
+	[ -n "$_mnt" ] && [ "$_mnt" != none ] && chown opennas:opennas "$_mnt" 2>/dev/null || true
+	echo "created dataset $ds"
+	;;
+
+dataset-destroy)
+	need_zfs
+	ds="${2:?dataset}"; valid_dataset "$ds" || die "invalid dataset name"
+	guard_pool "${ds%%/*}"
+	case "$ds" in */*) ;; *) die "refusing to destroy a pool's root dataset - destroy the pool instead" ;; esac
+	# -r takes the snapshots with it. Not -f: a dataset someone is still using
+	# should report that rather than be yanked out from under them.
+	if ! out=$(zfs destroy -r "$ds" 2>&1); then die "could not destroy the dataset: $(printf '%s' "$out" | tr '\n' ' ')"; fi
+	echo "destroyed dataset $ds"
+	;;
+
+dataset-quota)
+	need_zfs
+	ds="${2:?dataset}"; want="${3:?bytes or none}"
+	valid_dataset "$ds" || die "invalid dataset name"
+	guard_pool "${ds%%/*}"
+	case "$want" in
+		none) ;;
+		''|*[!0-9]*) die "quota must be a number of bytes, or 'none'" ;;
+	esac
+	# The reason datasets-as-shares is worth the trouble: a real per-share quota,
+	# enforced by the filesystem, on a filesystem where project quotas don't
+	# exist. btrfs cannot do this for a plain directory.
+	zfs set quota="$want" "$ds" 2>&1 || die "could not set the quota"
+	echo "quota on $ds set to $want"
+	;;
+
+snapshot-create)
+	need_zfs
+	ds="${2:?dataset}"; snap="${3:?name}"
+	valid_dataset "$ds" || die "invalid dataset name"
+	valid_name "$snap" || die "invalid snapshot name"
+	zfs snapshot "$ds@$snap" 2>&1 || die "could not take the snapshot"
+	echo "created $ds@$snap"
+	;;
+
+snapshot-destroy)
+	need_zfs
+	full="${2:?dataset@snapshot}"
+	ds="${full%@*}"; snap="${full#*@}"
+	[ "$ds" != "$full" ] || die "give it as dataset@snapshot"
+	valid_dataset "$ds" || die "invalid dataset name"
+	valid_name "$snap" || die "invalid snapshot name"
+	guard_pool "${ds%%/*}"
+	zfs destroy "$ds@$snap" 2>&1 || die "could not destroy the snapshot"
+	echo "destroyed $ds@$snap"
+	;;
+
+rollback)
+	need_zfs
+	full="${2:?dataset@snapshot}"
+	ds="${full%@*}"; snap="${full#*@}"
+	[ "$ds" != "$full" ] || die "give it as dataset@snapshot"
+	valid_dataset "$ds" || die "invalid dataset name"
+	valid_name "$snap" || die "invalid snapshot name"
+	guard_pool "${ds%%/*}"
+	# -r discards any snapshots newer than this one, which is the only way a
+	# rollback can proceed. Destructive and irreversible; the UI says so.
+	zfs rollback -r "$ds@$snap" 2>&1 || die "could not roll back"
+	echo "rolled $ds back to $snap"
+	;;
+
+*)
+	echo "usage: opennas-zfs {status|pools|pool-status|pool-create|pool-destroy|pool-export|pool-import|importable|scrub|datasets|dataset-create|dataset-destroy|dataset-quota|snapshots|snapshot-create|snapshot-destroy|rollback}" >&2
+	exit 1
+	;;
+esac

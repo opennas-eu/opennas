@@ -1,0 +1,47 @@
+<?xml version="1.0" standalone='no'?><!--*-nxml-*-->
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<!--
+  Advertises the OpenNAS web interface over mDNS, so the box can be found on the
+  LAN by name instead of by reading an IP off the console after installing.
+
+  avahi-daemon was already running and already publishing the hostname, but it
+  advertised no *services* - so nothing showed the machine as a NAS, and Finder
+  and Windows Explorer had nothing to list it under. Installed to
+  /etc/avahi/services/opennas.service, which avahi picks up without a restart.
+
+  %h expands to the machine's hostname, so this file needs no rewriting when the
+  admin renames the NAS.
+-->
+<service-group>
+  <name replace-wildcards="yes">%h (OpenNAS)</name>
+
+  <!--
+    HTTPS is what the web UI actually runs on; the plain-HTTP record points at
+    the same place, which nginx redirects. Both are advertised because some
+    browsers and discovery tools only look for one of them.
+  -->
+  <service>
+    <type>_https._tcp</type>
+    <port>443</port>
+    <txt-record>path=/</txt-record>
+    <txt-record>product=OpenNAS</txt-record>
+  </service>
+
+  <service>
+    <type>_http._tcp</type>
+    <port>80</port>
+    <txt-record>path=/</txt-record>
+    <txt-record>product=OpenNAS</txt-record>
+  </service>
+
+  <!--
+    Advertising the device class is what makes macOS show a NAS icon rather than
+    a generic computer. Samba publishes its own _smb._tcp record when it is
+    running, so that one is deliberately not duplicated here.
+  -->
+  <service>
+    <type>_device-info._tcp</type>
+    <port>0</port>
+    <txt-record>model=RackMac</txt-record>
+  </service>
+</service-group>

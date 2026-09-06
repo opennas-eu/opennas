@@ -1,0 +1,18 @@
+#!/bin/sh
+# Privileged log reader for OpenNAS, invoked via doas. Tails ONLY a fixed set of
+# whitelisted log files - never an arbitrary path. Installed to /usr/lib/opennas/.
+set -eu
+
+src="${1:?source}"
+n="${2:-200}"
+case "$n" in *[!0-9]*) n=200 ;; esac
+
+case "$src" in
+	system) f=/var/log/messages ;;
+	nginx)  f=/var/log/nginx/error.log ;;
+	auth)   f=/var/log/auth.log ;;
+	*) echo "unknown log source" >&2; exit 1 ;;
+esac
+
+[ -f "$f" ] || exit 0
+exec tail -n "$n" "$f"

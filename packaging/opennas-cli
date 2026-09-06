@@ -1,0 +1,72 @@
+#!/bin/sh
+# OpenNAS console admin CLI. For the recovery/console admin account (in `wheel`,
+# elevates via doas). Installed to /usr/sbin/opennas on the appliance.
+#
+#   opennas status                 overview: version, uptime, services, disks
+#   opennas services               list OpenNAS-managed services + state
+#   opennas service <name> <op>    start|stop|restart|status a service
+#   opennas logs [source] [n]      tail a log (opennas|system|nginx|auth)
+#   opennas update                 apk update && upgrade
+#   opennas help
+set -eu
+
+PREFIX=/usr/lib/opennas
+SERVICES="opennas nginx samba nfs netatalk sshd avahi-daemon dcron"
+
+# Re-exec via doas when not root (so the admin doesn't have to prefix it).
+if [ "$(id -u)" != "0" ]; then
+	command -v doas >/dev/null 2>&1 && exec doas "$0" "$@"
+fi
+
+c_on()  { printf '\033[32m%s\033[0m' "$1"; }
+c_off() { printf '\033[90m%s\033[0m' "$1"; }
+
+svc_state() {
+	if rc-service "$1" status >/dev/null 2>&1; then echo running; else echo stopped; fi
+}
+
+cmd_status() {
+	echo "OpenNAS $(cat $PREFIX/VERSION 2>/dev/null || echo '?')  -  $(hostname)"
+	echo "Uptime:$(uptime | sed 's/.*up//; s/,.*load.*//')"
+	echo
+	echo "Services:"
+	for s in $SERVICES; do
+		[ -e "/etc/init.d/$s" ] || continue
+		st=$(svc_state "$s")
+		[ "$st" = running ] && printf '  %-14s %s\n' "$s" "$(c_on running)" || printf '  %-14s %s\n' "$s" "$(c_off stopped)"
+	done
+	echo
+	echo "Disks:"
+	df -h | awk 'NR==1 || /^\/dev\//'
+}
+
+cmd_services() {
+	for s in $SERVICES; do
+		[ -e "/etc/init.d/$s" ] || continue
+		printf '%-14s %s\n' "$s" "$(svc_state "$s")"
+	done
+}
+
+case "${1:-help}" in
+	status)   cmd_status ;;
+	services) cmd_services ;;
+	service)
+		name="${2:?usage: opennas service <name> <start|stop|restart|status>}"
+		op="${3:?usage: opennas service <name> <start|stop|restart|status>}"
+		case "$op" in start|stop|restart|status) rc-service "$name" "$op" ;; *) echo "bad op: $op" >&2; exit 1 ;; esac
+		;;
+	logs)
+		src="${2:-opennas}"; n="${3:-100}"
+		case "$src" in
+			opennas) tail -n "$n" /var/log/opennas.log ;;
+			system)  tail -n "$n" /var/log/messages ;;
+			nginx)   tail -n "$n" /var/log/nginx/error.log ;;
+			auth)    tail -n "$n" /var/log/auth.log ;;
+			*) echo "unknown log: $src (opennas|system|nginx|auth)" >&2; exit 1 ;;
+		esac
+		;;
+	update)   apk update && apk upgrade ;;
+	help|-h|--help|*)
+		sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+		;;
+esac

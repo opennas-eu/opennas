@@ -1,0 +1,938 @@
+#!/bin/sh
+# OpenNAS guided installer (whiptail). Runs from the live ISO; installs a base
+# Alpine system plus OpenNAS onto a target disk, then enables the services.
+#
+# DRAFT: this performs destructive disk operations. Test in a VM first. The
+# heavy lifting (partitioning + bootloader) is delegated to Alpine's setup-disk.
+set -eu
+
+# inittab spawns us with a minimal PATH; make sure the standard dirs are on it
+# (whiptail lives in /usr/bin, setup-disk/apk in /sbin + /usr/sbin).
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+
+PAYLOAD_PREFIX=/usr/lib/opennas
+TITLE="OpenNAS Installer"
+
+die() { whiptail --title "$TITLE" --msgbox "Error: $1" 10 60 2>/dev/null || echo "Error: $1" >&2; exit 1; }
+warn() { echo "warning: $1" >&2; }
+[ "$(id -u)" = "0" ] || die "must run as root"
+command -v setup-disk >/dev/null 2>&1 || die "setup-disk (alpine-conf) is required"
+
+# --- answer file (unattended install) --------------------------------------
+# An answer file turns this into a no-prompt install: drop opennas-answers.conf
+# next to the ISO contents or on a USB stick and every question below is taken
+# from it instead of being asked.
+#
+# It is parsed as plain KEY=value, never sourced - an installer running as root
+# from removable media must not execute whatever it finds there.
+ANSWERS=""
+while [ "$#" -gt 0 ]; do
+	case "$1" in
+		--answers) ANSWERS="${2:-}"; shift 2 || die "--answers needs a path";;
+		--answers=*) ANSWERS="${1#--answers=}"; shift;;
+		-h|--help)
+			cat <<USAGE
+OpenNAS installer
+
+  opennas-install [--answers FILE]
+
+With no arguments the installer is interactive. With an answer file (or one
+found automatically on the install media as opennas-answers.conf) and
+UNATTENDED=yes set in it, it runs without prompting.
+
+Answer file keys:
+  UNATTENDED=yes            required for a no-prompt install
+  KEYMAP=us                 console keyboard layout
+  KEYMAP_VARIANT=us         layout variant (defaults to KEYMAP)
+  MODE=single|raid1         install target type
+  TARGET=/dev/sda           disk for MODE=single
+  RAID_DISKS="/dev/sda /dev/sdb"   two disks for MODE=raid1
+  DISK_LAYOUT=split|whole   separate data partition, or one big root
+  SYSTEM_SIZE=32G           size of the system partition when DISK_LAYOUT=split
+  HOSTNAME=opennas
+  ADMIN_USER=admin
+  ADMIN_PASSWORD=...        required when UNATTENDED=yes
+  CONFIRM_DELAY=10          seconds to abort before disks are erased
+USAGE
+			exit 0;;
+		*) die "unknown argument: $1";;
+	esac
+done
+
+# Fall back to a file on the install media, which is how an unattended install
+# is normally delivered (burn the ISO, drop the file on a stick).
+#
+# Alpine's live init mounts only the media it booted from (/media/cdrom), so a
+# file on a *separate* USB stick is sitting on an unmounted device and would
+# never be found by globbing /media. Look there first, then probe unmounted
+# filesystems read-only for the file, which is what "put it on a stick" means to
+# anyone who hasn't read the init scripts.
+if [ -z "$ANSWERS" ]; then
+	for cand in /media/*/opennas-answers.conf /opennas-answers.conf; do
+		if [ -f "$cand" ]; then ANSWERS="$cand"; break; fi
+	done
+fi
+if [ -z "$ANSWERS" ] && command -v lsblk >/dev/null 2>&1; then
+	probe=/tmp/opennas-answer-probe
+	mkdir -p "$probe"
+	# Only partitions that have a filesystem and aren't already mounted.
+	for dev in $(lsblk -lnpo NAME,FSTYPE,MOUNTPOINT 2>/dev/null | awk '$2 != "" && $2 != "squashfs" && NF < 3 {print $1}'); do
+		mount -o ro "$dev" "$probe" 2>/dev/null || continue
+		if [ -f "$probe/opennas-answers.conf" ]; then
+			# Copy it out before unmounting so the path stays valid.
+			cp "$probe/opennas-answers.conf" /tmp/opennas-answers.conf 2>/dev/null
+			umount "$probe" 2>/dev/null || true
+			[ -f /tmp/opennas-answers.conf ] && ANSWERS=/tmp/opennas-answers.conf
+			break
+		fi
+		umount "$probe" 2>/dev/null || true
+	done
+	rmdir "$probe" 2>/dev/null || true
+fi
+if [ -n "$ANSWERS" ] && [ ! -f "$ANSWERS" ]; then die "answer file not found: $ANSWERS"; fi
+
+# Read one key. Last occurrence wins; surrounding quotes and whitespace are
+# stripped. Returns the fallback (2nd arg) when the key isn't set.
+answer() {
+	[ -n "$ANSWERS" ] || { printf '%s' "${2-}"; return; }
+	_v=$(sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$ANSWERS" | tail -n1)
+	_v=${_v%\"}; _v=${_v#\"}
+	_v=${_v%\'}; _v=${_v#\'}
+	_v=$(printf '%s' "$_v" | sed 's/[[:space:]]*$//')
+	[ -n "$_v" ] || _v="${2-}"
+	printf '%s' "$_v"
+}
+
+UNATTENDED=no
+case "$(answer UNATTENDED no)" in
+	yes|true|1) UNATTENDED=yes;;
+esac
+
+# Interactive mode needs whiptail; unattended deliberately doesn't.
+if [ "$UNATTENDED" != "yes" ]; then
+	command -v whiptail >/dev/null 2>&1 || die "whiptail (newt) is required"
+fi
+
+# Echo progress in unattended mode, where there are no dialogs to watch.
+say() { [ "$UNATTENDED" = "yes" ] && echo "==> $*"; return 0; }
+
+if [ "$UNATTENDED" != "yes" ]; then
+	whiptail --title "$TITLE" --msgbox \
+		"Welcome to OpenNAS.\n\nThis installer will ERASE a disk and install OpenNAS onto it.\nMake sure you've picked the right disk on the next screen." 12 64
+fi
+
+# Turn "/dev/sda" + index into the right partition name (sda1 vs nvme0n1p1).
+partname() { case "$1" in *[0-9]) echo "${1}p${2}";; *) echo "${1}${2}";; esac; }
+
+# --- keyboard layout -------------------------------------------------------
+# This is deliberately the FIRST question. The admin password is typed a few
+# prompts down, and a password entered on a US layout when the keyboard is
+# German is a password nobody can reproduce at the login prompt afterwards. So
+# the layout is chosen and applied to the live console before anything is typed.
+KEYMAP=$(answer KEYMAP "")
+KEYMAP_VARIANT=$(answer KEYMAP_VARIANT "")
+
+if [ -z "$KEYMAP" ] && [ "$UNATTENDED" != "yes" ]; then
+	# Offer whatever the ISO actually ships, so the list can never name a layout
+	# that isn't installed; fall back to a common set if the tree is missing.
+	km_items=""
+	if [ -d /usr/share/bkeymaps ]; then
+		for d in /usr/share/bkeymaps/*; do
+			[ -d "$d" ] || continue
+			l=$(basename "$d")
+			km_items="$km_items $l \"$l\""
+		done
+	fi
+	[ -n "$km_items" ] || km_items=' us "us" gb "gb" de "de" fr "fr" es "es" it "it" dk "dk" no "no" se "se" fi "fi" nl "nl" pl "pl" pt "pt" cz "cz" hu "hu" ch "ch" ru "ru" ua "ua" br "br" tr "tr" jp "jp"'
+	KEYMAP=$(eval whiptail --title "'$TITLE'" --menu "'Keyboard layout (used for the password you type next):'" 20 60 12 $km_items 3>&1 1>&2 2>&3) || exit 1
+
+	# Some layouts ship several variants (de/de-nodeadkeys, us/us-intl, ...).
+	var_items=""
+	if [ -d "/usr/share/bkeymaps/$KEYMAP" ]; then
+		for f in "/usr/share/bkeymaps/$KEYMAP"/*.bmap*; do
+			[ -e "$f" ] || continue
+			v=$(basename "$f"); v=${v%.gz}; v=${v%.bmap}
+			var_items="$var_items $v \"$v\""
+		done
+	fi
+	if [ -n "$var_items" ]; then
+		KEYMAP_VARIANT=$(eval whiptail --title "'$TITLE'" --menu "'Layout variant:'" 18 60 8 $var_items 3>&1 1>&2 2>&3) || exit 1
+	fi
+fi
+
+[ -n "$KEYMAP" ] || KEYMAP=us
+[ -n "$KEYMAP_VARIANT" ] || KEYMAP_VARIANT="$KEYMAP"
+
+# Apply to the live console straight away, so every later prompt uses it.
+if command -v setup-keymap >/dev/null 2>&1; then
+	setup-keymap "$KEYMAP" "$KEYMAP_VARIANT" >/dev/null 2>&1 \
+		|| warn "could not apply keymap $KEYMAP/$KEYMAP_VARIANT to the live console"
+else
+	warn "setup-keymap not available; the console keeps the default layout"
+fi
+say "keyboard layout: $KEYMAP/$KEYMAP_VARIANT"
+
+# --- install target: single disk or RAID-1 mirror -------------------------
+MODE=$(answer MODE "")
+if [ -z "$MODE" ]; then
+	MODE=$(whiptail --title "$TITLE" --menu "How should OpenNAS be installed?" 13 66 2 \
+		single "Single disk" \
+		raid1  "RAID-1 mirror (2 disks; survives one disk failing)" \
+		3>&1 1>&2 2>&3) || exit 1
+fi
+case "$MODE" in single|raid1) ;; *) die "MODE must be 'single' or 'raid1' (got '$MODE')";; esac
+
+TARGET=$(answer TARGET "")            # single-disk target
+RAID_DISKS=$(answer RAID_DISKS "")    # space-separated disks for RAID-1
+
+if [ -n "$TARGET" ] || [ -n "$RAID_DISKS" ]; then
+	# Supplied by the answer file - check the devices exist before we trust them.
+	for d in $TARGET $RAID_DISKS; do
+		[ -b "$d" ] || die "not a block device: $d"
+	done
+	if [ "$MODE" = "raid1" ]; then
+		# shellcheck disable=SC2086
+		set -- $RAID_DISKS
+		[ "$#" -eq 2 ] || die "RAID_DISKS must name exactly two disks (got $#)"
+		WIPE_LIST="$RAID_DISKS"
+	else
+		[ -n "$TARGET" ] || die "MODE=single needs TARGET"
+		WIPE_LIST="$TARGET"
+	fi
+elif [ "$MODE" = "single" ]; then
+	menu_items=""
+	for dev in $(lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}'); do
+		menu_items="$menu_items /dev/$dev \"$(lsblk -dno SIZE "/dev/$dev") $(lsblk -dno MODEL "/dev/$dev" | tr -s ' ')\""
+	done
+	[ -n "$menu_items" ] || die "no disks found"
+	TARGET=$(eval whiptail --title "'$TITLE'" --menu "'Select the install disk (it will be WIPED):'" 20 72 8 $menu_items 3>&1 1>&2 2>&3) || exit 1
+	WIPE_LIST="$TARGET"
+else
+	check_items=""
+	for dev in $(lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}'); do
+		check_items="$check_items /dev/$dev \"$(lsblk -dno SIZE "/dev/$dev") $(lsblk -dno MODEL "/dev/$dev" | tr -s ' ')\" OFF"
+	done
+	[ -n "$check_items" ] || die "no disks found"
+	sel=$(eval whiptail --title "'$TITLE'" --checklist "'Select EXACTLY TWO disks for the RAID-1 mirror (BOTH WIPED):'" 20 74 8 $check_items 3>&1 1>&2 2>&3) || exit 1
+	RAID_DISKS=$(echo "$sel" | tr -d '"')
+	# shellcheck disable=SC2086
+	set -- $RAID_DISKS
+	[ "$#" -eq 2 ] || die "select exactly two disks for RAID-1 (got $#)"
+	WIPE_LIST="$RAID_DISKS"
+fi
+
+# --- hostname --------------------------------------------------------------
+HOSTNAME=$(answer HOSTNAME "")
+if [ -z "$HOSTNAME" ]; then
+	HOSTNAME=$(whiptail --title "$TITLE" --inputbox "Hostname:" 10 60 "opennas" 3>&1 1>&2 2>&3) || exit 1
+fi
+case "$HOSTNAME" in
+	""|*[!a-zA-Z0-9.-]*) die "invalid hostname: '$HOSTNAME'";;
+esac
+
+# --- admin account (non-root; root stays locked) ---------------------------
+# A normal user for console/recovery access that elevates via `doas`. The root
+# account itself is locked - there is no root login.
+ADMIN_USER=$(answer ADMIN_USER "")
+if [ -n "$ADMIN_USER" ]; then
+	case "$ADMIN_USER" in
+		root) die "ADMIN_USER must not be root";;
+		*[!a-z0-9_-]*) die "ADMIN_USER may only contain lowercase letters, digits, '_' and '-'";;
+	esac
+else
+	while :; do
+		ADMIN_USER=$(whiptail --title "$TITLE" --inputbox \
+			"Admin username (console/recovery login; becomes root via 'doas'):" 10 66 "admin" 3>&1 1>&2 2>&3) || exit 1
+		case "$ADMIN_USER" in
+			root|"") whiptail --title "$TITLE" --msgbox "Pick a non-root name." 8 50; continue;;
+			*[!a-z0-9_-]*) whiptail --title "$TITLE" --msgbox "Use only lowercase letters, digits, '_' and '-'." 8 56; continue;;
+		esac
+		break
+	done
+fi
+
+AP1=$(answer ADMIN_PASSWORD "")
+if [ -z "$AP1" ]; then
+	[ "$UNATTENDED" = "yes" ] && die "UNATTENDED=yes requires ADMIN_PASSWORD in the answer file"
+	while :; do
+		AP1=$(whiptail --title "$TITLE" --passwordbox "Password for '$ADMIN_USER':" 10 60 3>&1 1>&2 2>&3) || exit 1
+		AP2=$(whiptail --title "$TITLE" --passwordbox "Confirm password:" 10 60 3>&1 1>&2 2>&3) || exit 1
+		[ -n "$AP1" ] && [ "$AP1" = "$AP2" ] && break
+		whiptail --title "$TITLE" --msgbox "Passwords were empty or didn't match. Try again." 8 56
+	done
+fi
+
+# --- disk layout: one root filesystem, or system + data split --------------
+# Split keeps user data on its own filesystem, so reinstalling or resizing the
+# OS doesn't put the shares at risk, and a full system partition can't be caused
+# by someone filling a share. Only meaningful for a single disk - the RAID-1
+# path already builds its own layout.
+DISK_LAYOUT=$(answer DISK_LAYOUT "")
+SYSTEM_SIZE=$(answer SYSTEM_SIZE 32G)
+if [ "$MODE" = "single" ] && [ -z "$DISK_LAYOUT" ]; then
+	if [ "$UNATTENDED" = "yes" ]; then
+		DISK_LAYOUT="split"
+	else
+		DISK_LAYOUT=$(whiptail --title "$TITLE" --menu \
+			"How should $TARGET be divided?" 14 72 2 \
+			split "System + separate data partition (recommended)" \
+			whole "One partition for everything" \
+			3>&1 1>&2 2>&3) || exit 1
+	fi
+fi
+[ "$MODE" = "single" ] || DISK_LAYOUT=whole
+[ -n "$DISK_LAYOUT" ] || DISK_LAYOUT="split"
+case "$DISK_LAYOUT" in split|whole) ;; *) die "DISK_LAYOUT must be 'split' or 'whole'";; esac
+case "$SYSTEM_SIZE" in
+	*[!0-9GMgm]*|"") die "SYSTEM_SIZE must look like '32G' or '20480M'";;
+esac
+
+if [ "$DISK_LAYOUT" = "split" ]; then
+	# Refuse a disk too small to hold the system partition plus a useful data one.
+	disk_bytes=$(blockdev --getsize64 "$TARGET" 2>/dev/null || echo 0)
+	case "$SYSTEM_SIZE" in
+		*[Gg]) sys_bytes=$(( ${SYSTEM_SIZE%[Gg]} * 1024 * 1024 * 1024 ));;
+		*[Mm]) sys_bytes=$(( ${SYSTEM_SIZE%[Mm]} * 1024 * 1024 ));;
+		*)     sys_bytes=$(( SYSTEM_SIZE ));;
+	esac
+	# system + ESP + BIOS-boot + at least 1 GiB of data.
+	need=$(( sys_bytes + 2 * 1024 * 1024 * 1024 ))
+	if [ "$disk_bytes" -gt 0 ] && [ "$disk_bytes" -lt "$need" ]; then
+		die "$TARGET is too small for a $SYSTEM_SIZE system partition plus data. Use DISK_LAYOUT=whole or a smaller SYSTEM_SIZE."
+	fi
+fi
+
+layout_note="one partition for everything"
+if [ "$DISK_LAYOUT" = "split" ]; then
+	layout_note="$SYSTEM_SIZE system partition + the rest for data"
+fi
+
+if [ "$UNATTENDED" = "yes" ]; then
+	# No dialog to click, so give a visible, abortable countdown before the point
+	# of no return. A stale answer file on a stick should not silently eat a disk.
+	delay=$(answer CONFIRM_DELAY 10)
+	case "$delay" in *[!0-9]*|"") delay=10;; esac
+	echo
+	echo "  OpenNAS unattended install"
+	echo "  Disks to ERASE : $WIPE_LIST"
+	echo "  Layout         : $layout_note"
+	echo "  Hostname       : $HOSTNAME"
+	echo "  Admin user     : $ADMIN_USER"
+	echo "  Keyboard       : $KEYMAP/$KEYMAP_VARIANT"
+	echo
+	i="$delay"
+	while [ "$i" -gt 0 ]; do
+		printf '\r  ALL DATA ON THOSE DISKS WILL BE LOST - starting in %2ds (Ctrl-C to abort) ' "$i"
+		sleep 1
+		i=$(( i - 1 ))
+	done
+	echo
+else
+	whiptail --title "$TITLE" --yesno \
+		"ERASE the following disk(s) and install OpenNAS?\n\n  $WIPE_LIST\n\nLayout: $layout_note\n\nALL DATA ON THEM WILL BE LOST.\nAdmin user '$ADMIN_USER' will be created (root login disabled)." 16 66 || exit 1
+fi
+
+# Locate the on-ISO apk repo so everything installs OFFLINE (no network mirror).
+CDREPO=""
+for d in /media/*/apks; do [ -d "$d" ] && CDREPO="$d" && break; done
+ALPINE_VER="$(cut -d. -f1,2 /etc/alpine-release 2>/dev/null || echo 3.21)"
+REPO_ARG=""
+[ -n "$CDREPO" ] && REPO_ARG="--repository $CDREPO --allow-untrusted"
+[ -n "$CDREPO" ] && echo "$CDREPO" > /etc/apk/repositories || warn "No on-ISO apk repo found; install may need network."
+
+echo "$HOSTNAME" > /etc/hostname
+hostname "$HOSTNAME" 2>/dev/null || true
+
+LOG=/tmp/opennas-install.log
+mnt=/mnt/opennas-target
+mkdir -p "$mnt"
+ESPS=""        # ESP partition(s) to install GRUB onto
+RAID_MODE=0
+
+fail_log() { whiptail --title "$1" --scrolltext --textbox "$LOG" 24 78 2>/dev/null || tail -n 30 "$LOG"; die "$2 Full log: $LOG (Alt-F2 for a shell)."; }
+
+DATA_PART=""   # separate data filesystem, when DISK_LAYOUT=split
+
+if [ "$MODE" = "single" ] && [ "$DISK_LAYOUT" = "split" ]; then
+	# Partition ourselves so user data gets its own filesystem, then let
+	# setup-disk install the base system into the mounted root.
+	#
+	# The 1 MiB BIOS-boot partition is what lets GRUB embed its core image on a
+	# GPT disk booted through legacy BIOS; without it a BIOS install of this
+	# layout has nowhere to put core.img and won't boot. It costs nothing on UEFI.
+	echo "==> Partitioning $TARGET (system $SYSTEM_SIZE + data)" | tee "$LOG"
+	wipefs -aq "$TARGET" >>"$LOG" 2>&1 || true
+	sfdisk "$TARGET" >>"$LOG" 2>&1 <<SFD || fail_log "partitioning failed" "Could not partition $TARGET."
+label: gpt
+size=1MiB, type=21686148-6449-6E6F-744E-656564454649
+size=512MiB, type=uefi
+size=$SYSTEM_SIZE, type=linux
+type=linux
+SFD
+	mdev -s 2>/dev/null || true; sleep 1
+	esp=$(partname "$TARGET" 2)
+	sys_part=$(partname "$TARGET" 3)
+	DATA_PART=$(partname "$TARGET" 4)
+	[ -b "$sys_part" ] && [ -b "$DATA_PART" ] || fail_log "partitioning failed" "Expected partitions did not appear on $TARGET."
+
+	mkfs.fat -F32 "$esp" >>"$LOG" 2>&1 || fail_log "format failed" "Could not format the ESP."
+	mkfs.ext4 -F -L opennas-sys "$sys_part" >>"$LOG" 2>&1 || fail_log "format failed" "Could not format the system partition."
+	mkfs.ext4 -F -L opennas-data "$DATA_PART" >>"$LOG" 2>&1 || fail_log "format failed" "Could not format the data partition."
+
+	mount "$sys_part" "$mnt" || die "mount $sys_part failed"
+	mkdir -p "$mnt/boot/efi"
+	mount "$esp" "$mnt/boot/efi" || die "mount ESP failed"
+
+	echo "==> Installing base system into $sys_part" | tee -a "$LOG"
+	export BOOTLOADER="grub"
+	[ -d /sys/firmware/efi ] && export USE_EFI=1
+	# Mountpoint form: install into the filesystem we just prepared and mounted.
+	yes | setup-disk -m sys -k lts "$mnt" >>"$LOG" 2>&1 || fail_log "setup-disk failed" "Base system install failed."
+
+	# Mount data where OpenNAS keeps everything the user cares about, before the
+	# payload directories below are created - so they land on the data filesystem.
+	mkdir -p "$mnt/var/lib/opennas"
+	mount "$DATA_PART" "$mnt/var/lib/opennas" || die "mount $DATA_PART failed"
+
+	# Write fstab ourselves rather than trusting whatever setup-disk left, so all
+	# three filesystems are described and the UUIDs are the ones we just made.
+	cat > "$mnt/etc/fstab" <<FST
+UUID=$(blkid -s UUID -o value "$sys_part")  /                 ext4  rw,relatime  0 1
+UUID=$(blkid -s UUID -o value "$esp")  /boot/efi         vfat  rw,relatime  0 2
+UUID=$(blkid -s UUID -o value "$DATA_PART")  /var/lib/opennas  ext4  rw,relatime  0 2
+FST
+	ESPS="$esp"
+elif [ "$MODE" = "single" ]; then
+	# setup-disk partitions the disk + installs the base OS.
+	export BOOTLOADER="grub"
+	[ -d /sys/firmware/efi ] && export USE_EFI=1
+	echo "==> Installing base system to $TARGET" | tee "$LOG"
+	yes | setup-disk -m sys -k lts "$TARGET" >>"$LOG" 2>&1 || fail_log "setup-disk failed" "Disk setup failed."
+	root_part=$(lsblk -lnpo NAME,FSTYPE "$TARGET" | awk '$2 && $2!="vfat" && $2!="swap"{print $1}' | tail -n1)
+	[ -n "$root_part" ] || die "couldn't find the installed root partition on $TARGET"
+	mount "$root_part" "$mnt" || die "mount $root_part failed"
+	ESPS="$(lsblk -lnpo NAME,FSTYPE "$TARGET" | awk '$2=="vfat"{print $1}' | head -n1)"
+else
+	# ---- RAID-1 mirror (EXPERIMENTAL) - partition both, mdadm, manual base ----
+	# shellcheck disable=SC2086
+	set -- $RAID_DISKS; d1="$1"; d2="$2"
+	echo "==> Creating RAID-1 mirror: $d1 + $d2" | tee "$LOG"
+	for d in "$d1" "$d2"; do
+		wipefs -aq "$d" >>"$LOG" 2>&1 || true
+		sfdisk "$d" >>"$LOG" 2>&1 <<SFD || fail_log "partitioning failed" "Could not partition $d."
+label: gpt
+size=512MiB, type=uefi
+type=raid
+SFD
+	done
+	mdev -s 2>/dev/null || true; sleep 1
+	e1=$(partname "$d1" 1); e2=$(partname "$d2" 1)
+	r1=$(partname "$d1" 2); r2=$(partname "$d2" 2)
+	{ mkfs.fat -F32 "$e1" && mkfs.fat -F32 "$e2"; } >>"$LOG" 2>&1 || fail_log "format failed" "Could not format the ESP partitions."
+	mdadm --create /dev/md0 --level=1 --raid-devices=2 --metadata=1.2 --run "$r1" "$r2" >>"$LOG" 2>&1 \
+		|| fail_log "mdadm failed" "Could not create the RAID-1 array."
+	mkfs.ext4 -F /dev/md0 >>"$LOG" 2>&1 || fail_log "format failed" "Could not format the array."
+	mount /dev/md0 "$mnt" || die "mount /dev/md0 failed"
+	mkdir -p "$mnt/boot/efi"; mount "$e1" "$mnt/boot/efi" || die "mount ESP failed"
+
+	echo "==> Installing base system onto the array" | tee -a "$LOG"
+	# shellcheck disable=SC2086
+	apk add --root "$mnt" --initdb --no-cache $REPO_ARG \
+		alpine-base busybox openrc linux-lts linux-firmware-none mkinitfs \
+		mdadm e2fsprogs dosfstools >>"$LOG" 2>&1 || fail_log "base install failed" "Base system install failed."
+
+	# fstab, array config, and an initramfs that can assemble RAID at boot.
+	rootuuid=$(blkid -s UUID -o value /dev/md0)
+	espuuid=$(blkid -s UUID -o value "$e1")
+	cat > "$mnt/etc/fstab" <<FST
+UUID=$rootuuid  /          ext4  rw,relatime  0 1
+UUID=$espuuid   /boot/efi  vfat  rw,relatime  0 2
+FST
+	mdadm --detail --scan >> "$mnt/etc/mdadm.conf" 2>>"$LOG" || true
+	mkdir -p "$mnt/etc/mkinitfs"
+	echo 'features="ata base cdrom ext4 keymap kms mmc nvme raid scsi usb virtio"' > "$mnt/etc/mkinitfs/mkinitfs.conf"
+	echo "$HOSTNAME" > "$mnt/etc/hostname"
+	ESPS="$e1 $e2"
+	RAID_MODE=1
+fi
+
+# --- install OpenNAS into the target --------------------------------------
+echo "==> Installing OpenNAS packages + payload (offline, from the ISO)"
+
+# Core (must succeed). doas lets the unprivileged opennas service run the few
+# admin commands it needs (no root login required). grub* + efibootmgr are needed
+# so we can (re)install a reliable bootloader below.
+# shellcheck disable=SC2086
+# NOTE: everything the storage helper shells out to lives here, in the *core*
+# install that aborts on failure - not in the tolerant loop below. They were
+# previously in neither, so `opennas-storage` shipped unable to run.
+apk add --root "$mnt" --no-cache $REPO_ARG \
+	nodejs nginx doas openssl grub grub-bios grub-efi efibootmgr mkinitfs \
+	kbd-bkeymaps \
+	sfdisk blkid lsblk findmnt wipefs parted musl-utils nftables \
+	chrony tzdata \
+	quota-tools e2fsprogs-extra \
+	|| die "apk add (core) failed"
+
+# NAS stack: file sharing, discovery, storage/RAID, filesystems, disk health,
+# system tools. All ship on the ISO; installed one-by-one so an odd name can't
+# abort the whole install.
+for pkg in \
+	samba nfs-utils netatalk \
+	avahi avahi-tools dbus wsdd \
+	mdadm lvm2 cryptsetup \
+	btrfs-progs xfsprogs exfatprogs ntfs-3g dosfstools e2fsprogs \
+	zfs zfs-lts zfs-openrc zfs-udev zfs-scripts \
+	eudev \
+	smartmontools nvme-cli hdparm \
+	openssh \
+	docker docker-cli docker-cli-compose \
+	libvirt libvirt-daemon qemu-system-x86_64 qemu-img qemu-modules dbus-libs \
+	rsync dcron lm-sensors tzdata; do
+	# shellcheck disable=SC2086
+	apk add --root "$mnt" --no-cache $REPO_ARG "$pkg" || echo "   (skip: '$pkg' not available)"
+done
+
+# Give the installed system normal network repos for future `apk upgrade`.
+cat > "$mnt/etc/apk/repositories" <<EOF
+http://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/main
+http://dl-cdn.alpinelinux.org/alpine/v${ALPINE_VER}/community
+EOF
+
+mkdir -p "$mnt/usr/lib/opennas" \
+	"$mnt/var/lib/opennas/shared" "$mnt/var/lib/opennas/avatars" \
+	"$mnt/var/lib/opennas/generated" "$mnt/var/lib/opennas/volumes"
+cp -a "$PAYLOAD_PREFIX/." "$mnt/usr/lib/opennas/"
+cp -a /etc/conf.d/opennas "$mnt/etc/conf.d/opennas"
+cp -a /etc/init.d/opennas "$mnt/etc/init.d/opennas"
+cp -a /etc/init.d/opennas-tls "$mnt/etc/init.d/opennas-tls"
+cp -a /etc/init.d/opennas-banner "$mnt/etc/init.d/opennas-banner" 2>/dev/null || true
+cp -a /etc/init.d/opennas-firewall "$mnt/etc/init.d/opennas-firewall" 2>/dev/null || true
+install -D -m 0644 /etc/nginx/http.d/opennas.conf "$mnt/etc/nginx/http.d/opennas.conf"
+# mDNS advertisement, so the NAS is findable by name rather than by an IP read
+# off the console. avahi-daemon was already running but published no services.
+install -D -m 0644 /etc/avahi/services/opennas.service "$mnt/etc/avahi/services/opennas.service" 2>/dev/null || true
+# The release signing key's public half. Without it the machine refuses every
+# update, which is the right way to fail.
+install -D -m 0644 /etc/opennas/update-key.pub "$mnt/etc/opennas/update-key.pub" 2>/dev/null || \
+	echo "   (no update key baked into this ISO; self-update will be unavailable)"
+# The console admin CLI. It lives at /usr/sbin on the ISO, not under the payload
+# prefix, so the blanket copy above misses it - which is why `opennas` existed on
+# the live image and nowhere on an installed machine.
+install -D -m 0755 /usr/sbin/opennas "$mnt/usr/sbin/opennas"
+# The unattended-install example, so it can be read on the installed system too.
+[ -d /usr/share/opennas ] && cp -a /usr/share/opennas "$mnt/usr/share/" || true
+# (The installer itself is NOT copied to the target - it only belongs on the ISO.)
+
+# TLS: the cert dir is owned by opennas so the web UI can replace the cert;
+# opennas-tls generates a self-signed one on first boot (before nginx starts).
+mkdir -p "$mnt/etc/opennas/tls"
+
+# nginx ships a default vhost that also claims `listen 80 default_server`, which
+# collides with ours ("duplicate default server") and stops nginx from starting.
+rm -f "$mnt/etc/nginx/http.d/default.conf"
+
+# The target inherited the live ISO's inittab (which auto-runs the *installer*).
+# Replace it with a normal one: plain getty logins (the installer doesn't belong
+# on the installed system). Root is locked, so log in as the admin user.
+cat > "$mnt/etc/inittab" <<'EOF'
+::sysinit:/sbin/openrc sysinit
+::sysinit:/sbin/openrc boot
+::wait:/sbin/openrc default
+
+tty1::respawn:/sbin/getty 38400 tty1
+tty2::respawn:/sbin/getty 38400 tty2
+tty3::respawn:/sbin/getty 38400 tty3
+ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100
+
+::ctrlaltdel:/sbin/reboot
+::shutdown:/sbin/openrc shutdown
+EOF
+
+# Seed minimal daemon configs so the services can start before any share exists;
+# OpenNAS rewrites these whenever shares change (linux mode).
+mkdir -p "$mnt/etc/samba"
+[ -f "$mnt/etc/samba/smb.conf" ] || cat > "$mnt/etc/samba/smb.conf" <<'SMB'
+[global]
+   workgroup = WORKGROUP
+   server string = OpenNAS
+   security = user
+   map to guest = Never
+SMB
+[ -f "$mnt/etc/exports" ] || echo "# Managed by OpenNAS" > "$mnt/etc/exports"
+
+# doas policy: the unprivileged opennas service may run exactly these admin tools
+# as root (to reload the file-sharing daemons + manage Samba users) - nothing else.
+install -d -m 0755 "$mnt/etc/doas.d"
+cat > "$mnt/etc/doas.d/opennas.conf" <<'DOAS'
+# Allow OpenNAS (running as the 'opennas' user) to manage file sharing.
+permit nopass opennas as root cmd smbcontrol
+permit nopass opennas as root cmd exportfs
+permit nopass opennas as root cmd smbpasswd
+permit nopass opennas as root cmd adduser
+permit nopass opennas as root cmd deluser
+permit nopass opennas as root cmd addgroup
+permit nopass opennas as root cmd delgroup
+permit nopass opennas as root cmd rc-service
+permit nopass opennas as root cmd rc-update
+permit nopass opennas as root cmd smartctl
+permit nopass opennas as root cmd reboot
+permit nopass opennas as root cmd poweroff
+permit nopass opennas as root cmd /usr/lib/opennas/opennas-storage
+permit nopass opennas as root cmd /usr/lib/opennas/opennas-sysctl
+permit nopass opennas as root cmd /usr/lib/opennas/opennas-logs
+permit nopass opennas as root cmd /usr/lib/opennas/opennas-firewall
+permit nopass opennas as root cmd /usr/lib/opennas/opennas-update
+permit nopass opennas as root cmd /usr/lib/opennas/opennas-zfs
+DOAS
+chmod 0600 "$mnt/etc/doas.d/opennas.conf"
+
+# Members of the 'wheel' group (the admin user) may become root via doas.
+echo "permit persist :wheel" > "$mnt/etc/doas.d/wheel.conf"
+chmod 0600 "$mnt/etc/doas.d/wheel.conf"
+
+# Turn on real-OS integration for the appliance. The backend runs UNPRIVILEGED
+# (as opennas) and uses doas for the few root commands; it writes the daemon
+# config files directly, so make those writable by opennas.
+cat >> "$mnt/etc/conf.d/opennas" <<'ENVV'
+
+# --- Set by the OpenNAS installer (real OS integration) ---
+export OPENNAS_SYSTEM_MODE=linux
+export OPENNAS_SMB_CONF=/etc/samba/smb.conf
+export OPENNAS_NFS_EXPORTS=/etc/exports
+ENVV
+# SSH access + authorized keys are managed for the console admin account.
+echo "export OPENNAS_SSH_USER=$ADMIN_USER" >> "$mnt/etc/conf.d/opennas"
+
+# --- bootloader (reliable GRUB) -------------------------------------------
+# setup-disk's GRUB can drop to the `grub>` shell (missing grub.cfg / no NVRAM
+# entry), so install it ourselves: --removable writes /EFI/BOOT/BOOTX64.EFI (the
+# firmware-agnostic fallback that always boots), and we regenerate grub.cfg.
+echo "==> Installing bootloader" | tee -a "$LOG"
+# Add a serial console to the kernel cmdline WITHOUT clobbering setup-disk's
+# essential `modules=...`/`rootfstype=...` (dropping those = "Mounting root: failed").
+grubdef="$mnt/etc/default/grub"
+mkdir -p "$mnt/etc/default"
+touch "$grubdef"
+if grep -q '^GRUB_CMDLINE_LINUX_DEFAULT=' "$grubdef"; then
+	grep -q 'console=ttyS0' "$grubdef" || \
+		sed -i 's/^\(GRUB_CMDLINE_LINUX_DEFAULT="[^"]*\)"/\1 console=tty0 console=ttyS0,115200"/' "$grubdef"
+else
+	echo 'GRUB_CMDLINE_LINUX_DEFAULT="modules=sd-mod,usb-storage,ext4 rootfstype=ext4 console=tty0 console=ttyS0,115200"' >> "$grubdef"
+fi
+grep -q '^GRUB_TIMEOUT=' "$grubdef" || echo 'GRUB_TIMEOUT=2' >> "$grubdef"
+# Branding: GRUB menu entries say "OpenNAS" instead of "Alpine"/"Linux lts".
+grep -q '^GRUB_DISTRIBUTOR=' "$grubdef" || echo 'GRUB_DISTRIBUTOR="OpenNAS"' >> "$grubdef"
+grep -q '^GRUB_DISABLE_SUBMENU=' "$grubdef" || echo 'GRUB_DISABLE_SUBMENU=y' >> "$grubdef"
+# Brand the OS name (login banner + grub fallback) while keeping ID=alpine (apk).
+if [ -f "$mnt/etc/os-release" ]; then
+	sed -i 's/^NAME=.*/NAME="OpenNAS"/; s/^PRETTY_NAME=.*/PRETTY_NAME="OpenNAS"/' "$mnt/etc/os-release"
+fi
+
+# The banner lives in a template that an admin can edit; opennas-banner renders
+# it into /etc/issue at boot, substituting @ADDR@ with the machine's current
+# address(es). Backslashes are doubled because getty eats single ones - the art
+# would otherwise arrive on screen with every "\" missing.
+mkdir -p "$mnt/etc/opennas"
+cat > "$mnt/etc/opennas/banner.template" <<'ISSUE'
+
+   ___                 _   _   _   ___
+  / _ \\ _ __  ___ _ _ | \\ | | /_\\ / __|
+ | (_) | '_ \\/ -_) ' \\|  \\| |/ _ \\\\__ \\
+  \\___/| .__/\\___|_||_|_|\\__/_/ \\_\\___/
+       |_|
+
+ OpenNAS on \n
+
+ Manage this NAS at:  @ADDR@
+
+ Console login is for recovery only. Use 'doas <command>' for root.
+
+ISSUE
+# Render it once now, so the very first boot already shows a banner even before
+# the service has run (it just won't have an address yet).
+cp "$mnt/etc/opennas/banner.template" "$mnt/etc/issue"
+sed -i 's/@ADDR@/(starting up)/' "$mnt/etc/issue"
+
+# --- console keyboard layout on the installed system ----------------------
+# The live console was switched at the start of the installer; this makes the
+# same layout survive the reboot.
+#
+# Alpine's service is `loadkmap`, which reads an absolute path out of
+# /etc/conf.d/loadkmap and expects a gzipped bmap it can find after /usr is
+# mounted - /etc/conf.d/keymaps and an rc-update of a "keymaps" service are
+# Gentoo conventions that do nothing here. `setup-disk` happens to copy the live
+# system's keymap config into the target, but the RAID path builds its base with
+# `apk add --root` and copies nothing, so this is written explicitly for both.
+km_src=""
+for cand in "/usr/share/bkeymaps/$KEYMAP/$KEYMAP_VARIANT.bmap.gz" \
+            "/usr/share/bkeymaps/$KEYMAP/$KEYMAP_VARIANT.bmap"; do
+	[ -f "$cand" ] && km_src="$cand" && break
+done
+if [ -n "$km_src" ]; then
+	mkdir -p "$mnt/etc/keymap" "$mnt/etc/conf.d"
+	case "$km_src" in
+		*.gz) cp "$km_src" "$mnt/etc/keymap/$KEYMAP_VARIANT.bmap.gz" ;;
+		*)    gzip -c "$km_src" > "$mnt/etc/keymap/$KEYMAP_VARIANT.bmap.gz" ;;
+	esac
+	cat > "$mnt/etc/conf.d/loadkmap" <<KEYMAPS
+# Set by the OpenNAS installer.
+KEYMAP=/etc/keymap/$KEYMAP_VARIANT.bmap.gz
+KEYMAPS
+else
+	warn "no keymap file for $KEYMAP/$KEYMAP_VARIANT; the console will use the default layout"
+fi
+
+for d in dev proc sys; do mount --bind "/$d" "$mnt/$d"; done
+mkdir -p "$mnt/boot/efi"
+
+boot_ok=1
+# RAID: rebuild the initramfs so it can assemble the array at boot (raid feature).
+if [ "$RAID_MODE" = "1" ]; then
+	kver="$(ls "$mnt/lib/modules" 2>/dev/null | head -n1)"
+	if [ -n "$kver" ]; then
+		chroot "$mnt" mkinitfs "$kver" >>"$LOG" 2>&1 || boot_ok=0
+	else
+		boot_ok=0
+	fi
+fi
+
+# Install GRUB to every ESP (both disks of a mirror, so it boots if one dies).
+# UEFI GRUB, onto every ESP (both disks of a mirror, so it boots if one dies).
+# Also unconditional: the ESP exists either way, and writing it means a disk
+# installed on an old BIOS board still boots when moved to a modern one.
+# --removable writes /EFI/BOOT/BOOTX64.EFI, the fallback path every firmware
+# tries without needing an NVRAM entry.
+for esp in $ESPS; do
+	mount "$esp" "$mnt/boot/efi" 2>/dev/null || true
+	chroot "$mnt" grub-install --target=x86_64-efi --efi-directory=/boot/efi \
+		--boot-directory=/boot --removable >>"$LOG" 2>&1 \
+		|| warn "UEFI GRUB install failed on $esp"
+	# An NVRAM entry needs efivars, so it only works when booted via UEFI.
+	if [ -d /sys/firmware/efi ]; then
+		chroot "$mnt" grub-install --target=x86_64-efi --efi-directory=/boot/efi \
+			--boot-directory=/boot --bootloader-id=opennas >>"$LOG" 2>&1 || true
+	fi
+	umount "$mnt/boot/efi" 2>/dev/null || true
+done
+
+# BIOS GRUB, installed unconditionally rather than only when the *installer*
+# happens to be running without UEFI.
+#
+# Keying this off the live system's firmware mode was wrong twice over: a disk
+# installed on a UEFI machine got no BIOS bootloader at all (so moving it to an
+# older board bricks it), and the layout already reserves a BIOS-boot partition
+# specifically so both can coexist. Installing both is what makes the disk
+# portable, and costs a few hundred kilobytes.
+for d in ${TARGET:-$RAID_DISKS}; do
+	chroot "$mnt" grub-install --target=i386-pc --boot-directory=/boot "$d" >>"$LOG" 2>&1 \
+		|| warn "BIOS GRUB install failed on $d (the disk may only boot via UEFI)"
+done
+
+# Generate grub.cfg (root device is auto-detected: the single disk or /dev/md0).
+first_esp="${ESPS%% *}"
+[ -n "$first_esp" ] && mount "$first_esp" "$mnt/boot/efi" 2>/dev/null || true
+chroot "$mnt" grub-mkconfig -o /boot/grub/grub.cfg >>"$LOG" 2>&1 || boot_ok=0
+umount "$mnt/boot/efi" 2>/dev/null || true
+
+for d in dev proc sys; do umount "$mnt/$d" 2>/dev/null || true; done
+
+# Verify a bootloader is actually on disk rather than trusting exit codes.
+#
+# grub-install can report success and still leave nothing usable - which is
+# exactly how a system got installed that dropped straight into `grub rescue>`
+# with "normal.mod not found". Check for the artefacts that must exist for each
+# firmware path, and treat "neither" as fatal: an install that completes and
+# then won't boot is the worst outcome this script can produce.
+have_bios=0
+have_efi=0
+[ -f "$mnt/boot/grub/i386-pc/normal.mod" ] && have_bios=1
+for _e in "$mnt/boot/grub/x86_64-efi/normal.mod" "$mnt/boot/efi/EFI/BOOT/BOOTX64.EFI"; do
+	[ -e "$_e" ] && have_efi=1
+done
+[ -f "$mnt/boot/grub/grub.cfg" ] || boot_ok=0
+
+if [ "$have_bios" = "0" ] && [ "$have_efi" = "0" ]; then
+	boot_ok=0
+	warn "no bootloader was installed (neither BIOS nor UEFI GRUB is present)"
+elif [ "$have_bios" = "0" ]; then
+	warn "no BIOS bootloader - this disk will only boot on UEFI firmware"
+elif [ "$have_efi" = "0" ]; then
+	warn "no UEFI bootloader - this disk will only boot on legacy BIOS firmware"
+fi
+
+if [ "$boot_ok" != "1" ]; then
+	whiptail --title "bootloader install failed" --scrolltext --textbox "$LOG" 24 78 2>/dev/null || tail -n 30 "$LOG"
+	die "Bootloader installation failed. Full log: $LOG (Alt-F2 for a shell)."
+fi
+
+# --- verify the tools the appliance actually shells out to ------------------
+#
+# The web UI and the console CLI are thin wrappers around these; a missing one
+# doesn't announce itself, it just makes a feature quietly fail at the moment
+# somebody needs it. `opennas-storage` shipped for a long time unable to run
+# because none of the util-linux binaries it calls were ever installed, and the
+# package loop above says "(skip: ...)" and carries on - so check the binaries
+# themselves rather than trusting that a package list was right.
+echo "==> Verifying the installed system has the tools it needs" | tee -a "$LOG"
+missing=""
+for _bin in \
+	sfdisk blkid lsblk findmnt wipefs partprobe mkfs.ext4 mkfs.xfs mkfs.btrfs \
+	mdadm smartctl getent addgroup delgroup adduser deluser nft chronyd \
+	setquota repquota chattr tune2fs \
+	node nginx doas openssl rc-service rc-update; do
+	chroot "$mnt" /bin/sh -c "command -v '$_bin' >/dev/null 2>&1" || missing="$missing $_bin"
+done
+# The console CLI and the privileged helpers the doas policy names.
+for _f in /usr/sbin/opennas /usr/lib/opennas/opennas-storage \
+	/usr/lib/opennas/opennas-sysctl /usr/lib/opennas/opennas-logs \
+	/usr/lib/opennas/opennas-firewall \
+	/usr/lib/opennas/opennas-update \
+	/usr/lib/opennas/opennas-zfs \
+	/usr/lib/opennas/server/index.js; do
+	[ -e "$mnt$_f" ] || missing="$missing $_f"
+done
+
+# ZFS is checked separately and does *not* abort the install. It is genuinely
+# optional - a machine with no pools never needs it - and the kernel module is
+# the one package here that can legitimately be unavailable for an architecture
+# or a kernel flavour. A warning is right; refusing to finish an install is not.
+if ! chroot "$mnt" /bin/sh -c "command -v zpool >/dev/null 2>&1"; then
+	echo "   (note: ZFS is not installed - pools and RAIDZ will be unavailable)" | tee -a "$LOG"
+fi
+
+if [ -n "$missing" ]; then
+	echo "!! MISSING:$missing" | tee -a "$LOG"
+	warn "some tools are missing:$missing"
+	# Not fatal - the system still boots and the web UI still runs; but say it
+	# loudly rather than letting it be discovered by a failing disk operation.
+	whiptail --title "Incomplete install" --msgbox \
+		"The system installed and will boot, but these are missing:\n\n$missing\n\nSome storage or admin features will not work. See $LOG." 16 70 2>/dev/null || true
+else
+	echo "   all required tools present" | tee -a "$LOG"
+fi
+
+# --- finalize inside the target -------------------------------------------
+chroot "$mnt" /bin/sh -e <<'CHROOT'
+addgroup -S opennas 2>/dev/null || true
+adduser -S -D -H -h /var/lib/opennas -s /sbin/nologin -G opennas opennas 2>/dev/null || true
+chown -R opennas:opennas /var/lib/opennas
+chmod 0750 /var/lib/opennas
+# Let the opennas service reach the Docker socket (Container manager).
+addgroup opennas docker 2>/dev/null || true
+# Let the opennas service drive libvirt + KVM (Virtual Machines app), unprivileged.
+addgroup opennas libvirt 2>/dev/null || true
+addgroup opennas kvm 2>/dev/null || true
+
+# Group membership alone is not enough: libvirtd defaults auth_unix_rw to
+# "polkit", and polkit is not installed on the appliance - so every non-root
+# connection failed with
+#   "org.freedesktop.PolicyKit1 was not provided by any .service files"
+# and the entire Virtual Machines app was dead on a real install while working
+# perfectly in development, where the adapter never talks to libvirt at all.
+# Authorise on the socket's group instead, which is what the addgroup above
+# already sets up.
+if [ -f /etc/libvirt/libvirtd.conf ]; then
+	sed -i -E '/^[[:space:]]*(unix_sock_group|unix_sock_ro_perms|unix_sock_rw_perms|auth_unix_ro|auth_unix_rw)[[:space:]]*=/d' \
+		/etc/libvirt/libvirtd.conf
+	cat >> /etc/libvirt/libvirtd.conf <<'LIBVIRTCONF'
+
+# --- OpenNAS: authorise by group membership, not polkit -------------------
+unix_sock_group = "libvirt"
+unix_sock_ro_perms = "0770"
+unix_sock_rw_perms = "0770"
+auth_unix_ro = "none"
+auth_unix_rw = "none"
+LIBVIRTCONF
+fi
+
+# Let the unprivileged opennas service rewrite the daemon configs + TLS cert.
+chown opennas:opennas /etc/samba/smb.conf /etc/exports 2>/dev/null || true
+chown -R opennas:opennas /etc/opennas/tls 2>/dev/null || true
+chmod 0750 /etc/opennas/tls 2>/dev/null || true
+
+# OpenNAS + reverse proxy (opennas-tls makes the cert before nginx starts)
+rc-update add opennas-tls default
+rc-update add opennas default
+rc-update add nginx default
+# Refreshes /etc/issue with the machine's address once networking is up.
+rc-update add opennas-banner default 2>/dev/null || true
+
+# Discovery + system daemons. The file-sharing daemons (samba/nfs/netatalk) are
+# intentionally NOT enabled here: OpenNAS owns them via the Services panel and
+# enforces the configured state at boot, so "disabled" really means stopped.
+# dbus is listed explicitly rather than left to OpenRC's `need` resolution:
+# avahi-daemon and libvirtd both depend on it, and the mDNS name shown in the
+# UI is read from avahi over the system bus.
+for svc in dbus avahi-daemon wsdd dcron crond smartd docker libvirtd chronyd; do
+	rc-update add "$svc" default 2>/dev/null || true
+done
+
+# mdadm-raid belongs in `boot`, not `default`: localmount processes /etc/fstab
+# during the boot runlevel, so an array assembled in `default` does not exist
+# yet when its filesystem is meant to be mounted. It was in `default`, and a
+# RAID data volume duly failed to come back after every reboot.
+rc-update add mdadm-raid boot 2>/dev/null || true
+
+# udev, which ZFS needs and Alpine does not install by itself.
+#
+# `zfs-udev` ships rules and depends on nothing, so a default Alpine runs ZFS
+# under busybox mdev - and `zpool create` on a whole disk waits for the partition
+# node it just created to appear, which under mdev nobody is managing. Measured
+# in a VM: after destroying a pool, the old partition nodes were still present
+# fifteen seconds later, and every subsequent create failed with ENODEV. Without
+# udev, rebuilding a pool simply does not work.
+for svc in udev udev-trigger udev-settle; do
+	rc-update add "$svc" sysinit 2>/dev/null || true
+done
+
+# ZFS, for the same reason and in the same runlevel as mdadm above: pools have
+# to be imported and mounted before anything expects a path inside one to exist.
+# zfs-import reads /etc/zfs/zpool.cache, which the helper writes on create; zfs-mount
+# then mounts every dataset. `zfs-load-key` is harmless with no encrypted datasets
+# and is what makes encrypted ones work later without another install step.
+for svc in zfs-import zfs-mount zfs-load-key zfs-zed; do
+	rc-update add "$svc" boot 2>/dev/null || true
+done
+
+# Apply the console keymap at boot. On Alpine the service is `loadkmap`; it's
+# already in the boot runlevel after setup-disk, but the RAID path builds its
+# base by hand, so add it unconditionally (rc-update is idempotent).
+rc-update add loadkmap boot 2>/dev/null || true
+
+# --- hardening: no usable root / console login ---------------------------
+# Lock the root account so there's no password login.
+passwd -l root 2>/dev/null || true
+# Don't auto-start sshd; if it's ever enabled, forbid root login.
+if [ -f /etc/ssh/sshd_config ]; then
+	sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+fi
+CHROOT
+
+# --- create the non-root admin user (vars expand here, outside the heredoc) -
+chroot "$mnt" adduser -D -h "/home/$ADMIN_USER" -s /bin/sh "$ADMIN_USER" 2>/dev/null || true
+chroot "$mnt" adduser "$ADMIN_USER" wheel 2>/dev/null || true
+echo "$ADMIN_USER:$AP1" | chroot "$mnt" chpasswd || die "setting admin password failed"
+
+sync
+# The data filesystem is mounted *inside* the target root, so it has to come off
+# first or the root unmount fails and the install finishes with dirty filesystems.
+if [ -n "$DATA_PART" ]; then umount "$mnt/var/lib/opennas" 2>/dev/null || true; fi
+umount "$mnt" 2>/dev/null || true
+
+done_msg="OpenNAS was installed to ${TARGET:-$RAID_DISKS}."
+if [ -n "$DATA_PART" ]; then
+	done_msg="$done_msg\n\nUser data lives on its own partition ($DATA_PART), mounted at /var/lib/opennas."
+fi
+done_msg="$done_msg\n\nRoot login is disabled. Console/recovery login: '$ADMIN_USER' (use 'doas <cmd>' for root).\n\nRemove the install media and reboot, then open\n  http://$HOSTNAME/  (or the box's IP) to finish setup."
+
+if [ "$UNATTENDED" = "yes" ]; then
+	echo
+	printf '%b\n' "$done_msg"
+	echo
+	echo "Rebooting in 5 seconds..."
+	sleep 5
+else
+	whiptail --title "$TITLE" --msgbox "$done_msg" 17 70
+fi
+reboot

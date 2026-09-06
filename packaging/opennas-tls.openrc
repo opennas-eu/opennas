@@ -1,0 +1,20 @@
+#!/sbin/openrc-run
+# Ensures a TLS certificate exists before nginx starts (generates a self-signed
+# one on first boot). Runs once at boot; the cert persists afterwards.
+name="OpenNAS TLS bootstrap"
+description="Generate a self-signed TLS certificate if none exists"
+
+depend() {
+	before nginx
+	need localmount
+}
+
+start() {
+	ebegin "Ensuring OpenNAS TLS certificate"
+	/usr/lib/opennas/gen-self-signed-cert.sh
+	eend $?
+}
+
+stop() {
+	return 0
+}

@@ -1,0 +1,25 @@
+#!/bin/sh
+# Regenerates /etc/issue so the console banner shows this machine's current
+# addresses. Installed to /usr/lib/opennas/ and run at boot by opennas-banner.
+#
+# Why not just put \4 in /etc/issue: that escape is a util-linux agetty
+# extension. Alpine's console is busybox getty, which doesn't implement it and
+# prints a bare "4" instead. Substituting the address here works with whatever
+# getty is present, and can list every address rather than only the first.
+set -eu
+
+TEMPLATE=/etc/opennas/banner.template
+ISSUE=/etc/issue
+
+[ -f "$TEMPLATE" ] || exit 0
+
+# Every global IPv4 the box currently holds, space-separated. Loopback and
+# link-local are useless to someone trying to reach the web UI.
+addrs=$(ip -4 -o addr show scope global 2>/dev/null | awk '{split($4,a,"/"); print a[1]}' | tr '\n' ' ')
+addrs=${addrs% }
+[ -n "$addrs" ] || addrs="(no network address yet)"
+
+# @ADDR@ is the only substitution, so the rest of the template - including any
+# backslashes in ASCII art - is written through untouched.
+awk -v addrs="$addrs" '{ gsub(/@ADDR@/, addrs); print }' "$TEMPLATE" > "$ISSUE.tmp"
+mv -f "$ISSUE.tmp" "$ISSUE"

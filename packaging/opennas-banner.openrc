@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+# Rewrites the console banner with the machine's current IP address(es).
+name="OpenNAS console banner"
+description="Show this machine's addresses on the login screen"
+
+depend() {
+	need net
+	after networking
+}
+
+start() {
+	ebegin "Updating console banner"
+	/usr/lib/opennas/opennas-banner
+	eend $?
+}
+
+stop() {
+	return 0
+}

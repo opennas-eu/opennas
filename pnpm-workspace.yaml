@@ -1,0 +1,11 @@
+packages:
+  - "packages/*"
+  - "apps/*"
+
+# Allow these dependencies to run install/build scripts (pnpm blocks by default).
+# better-sqlite3 fetches/builds its native binding; esbuild installs its binary.
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+  # sharp verifies its libvips native binding for image thumbnails.
+  sharp: true

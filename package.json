@@ -1,0 +1,29 @@
+{
+  "name": "opennas",
+  "version": "0.9.0-beta.1",
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "description": "OpenNAS - the NAS operating system: API, web desktop and appliance",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,magenta \"pnpm --filter @opennas/api dev\" \"pnpm --filter @opennas/web dev\"",
+    "build": "pnpm --filter @opennas/shared build && pnpm --filter @opennas/web build && pnpm --filter @opennas/api build",
+    "start": "pnpm --filter @opennas/api start",
+    "dist": "packaging/build-dist.sh",
+    "typecheck": "pnpm -r typecheck && pnpm typecheck:tests",
+    "format": "prettier --write .",
+    "test": "node --experimental-transform-types --import ./tests/setup.mjs --test \"tests/**/*.test.ts\"",
+    "test:unit": "node --experimental-transform-types --import ./tests/setup.mjs --test \"tests/unit/*.test.ts\"",
+    "test:system": "node --experimental-transform-types --import ./tests/setup.mjs --test \"tests/system/*.test.ts\"",
+    "test:watch": "node --experimental-transform-types --import ./tests/setup.mjs --test --watch \"tests/**/*.test.ts\"",
+    "typecheck:tests": "tsc -p tests --noEmit"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.3"
+  }
+}

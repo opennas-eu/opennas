@@ -1,0 +1,5 @@
+{
+  "name": "@opennas/tests",
+  "private": true,
+  "type": "module"
+}

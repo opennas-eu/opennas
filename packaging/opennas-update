@@ -1,0 +1,239 @@
+#!/bin/sh
+# Privileged updater for OpenNAS. Invoked through doas by the unprivileged
+# backend, which allow-lists this exact path.
+#
+#   opennas-update apply <bundle.tar.gz> <bundle.sig>
+#   opennas-update rollback
+#   opennas-update status
+#
+# ## Why the signature is checked *here*
+#
+# The backend runs as `opennas` and does the downloading. If it were also the
+# thing deciding a bundle is genuine, then anyone who compromised the backend
+# could hand this script an arbitrary tree and have it installed as root - the
+# update path would become a way to turn a web bug into root. So the trust
+# boundary is this script: it verifies the signature itself, against a key that
+# only root can replace, and treats everything it is handed as hostile.
+#
+# ## Why the swap is a rename
+#
+# `cp` over a running shell script corrupts it mid-execution: the shell reads
+# the file incrementally, so the bytes can change underneath it. Renaming
+# directories does not - an open file descriptor survives the rename. So the new
+# tree is built alongside and swapped in with `mv`, and this script re-execs
+# itself from a private copy first so nothing can move underneath it at all.
+#
+# ## Why it detaches
+#
+# It has to restart the service that started it. Without breaking away from that
+# process group, restarting the backend would kill the updater partway through -
+# most likely with the tree half-swapped.
+set -eu
+
+PREFIX=/usr/lib/opennas
+NEW="${PREFIX}.new"
+OLD="${PREFIX}.old"
+KEY="/etc/opennas/update-key.pub"
+STATE_DIR=/var/lib/opennas/update
+STATUS="$STATE_DIR/status"
+LOG="$STATE_DIR/update.log"
+# How long to wait for the new version to answer before giving up on it.
+HEALTH_TIMEOUT=90
+HEALTH_URL="http://127.0.0.1:4174/api/health"
+
+say() { echo "$(date -Iseconds) $*" >> "$LOG" 2>/dev/null || true; }
+
+set_status() {
+	mkdir -p "$STATE_DIR"
+	# state|message|timestamp - read back by the backend for the UI.
+	printf '%s|%s|%s\n' "$1" "$2" "$(date -Iseconds)" > "$STATUS"
+}
+
+fail() {
+	say "FAILED: $*"
+	set_status failed "$*"
+	echo "$*" >&2
+	exit 1
+}
+
+# One attempt at the health endpoint, not twenty.
+#
+# Alpine's busybox wget does not retry; GNU wget retries by default and has no
+# way to say "once" that busybox also understands. So the client is chosen here
+# rather than hoping whichever one is installed behaves like the other.
+health_probe() {
+	if command -v curl >/dev/null 2>&1; then
+		curl -fsS -m 3 -o /dev/null "$HEALTH_URL" 2>/dev/null
+	elif wget --help 2>&1 | grep -q -- '--tries'; then
+		wget -q -T 3 --tries=1 -O /dev/null "$HEALTH_URL" 2>/dev/null
+	else
+		wget -q -T 3 -O /dev/null "$HEALTH_URL" 2>/dev/null
+	fi
+}
+
+verify_bundle() {
+	bundle="$1"; sig="$2"
+	[ -f "$bundle" ] || fail "no such bundle: $bundle"
+	[ -f "$sig" ] || fail "no signature alongside the bundle"
+	[ -f "$KEY" ] || fail "no update key at $KEY - this install cannot verify updates"
+	command -v openssl >/dev/null 2>&1 || fail "openssl is not installed, so the update cannot be verified"
+
+	# Ed25519 over the raw bundle bytes. `-rawin` is required: Ed25519 signs the
+	# message itself rather than a pre-computed digest.
+	openssl pkeyutl -verify -pubin -inkey "$KEY" -rawin -in "$bundle" -sigfile "$sig" >/dev/null 2>&1 ||
+		fail "the update's signature is not valid for this installation's key"
+	say "signature verified"
+}
+
+# Everything the update replaces. node_modules is deliberately absent: it holds
+# better-sqlite3, which is compiled for this machine's architecture and libc, so
+# a bundle can't carry one that would work everywhere.
+KEEP_DIRS="node_modules"
+
+do_apply() {
+	bundle="$1"; sig="$2"
+	verify_bundle "$bundle" "$sig"
+
+	rm -rf "$NEW"
+	mkdir -p "$NEW"
+	tar -xzf "$bundle" -C "$NEW" || fail "the update bundle could not be unpacked"
+
+	# A bundle that doesn't contain a server is not an OpenNAS update, whatever
+	# it is signed with.
+	[ -f "$NEW/server/index.js" ] || fail "the bundle has no server/index.js - it is not an OpenNAS update"
+	[ -f "$NEW/VERSION" ] || fail "the bundle has no VERSION"
+
+	# Carry the native modules across. Moved rather than copied so the swap is
+	# quick and doesn't need twice the disk.
+	for d in $KEEP_DIRS; do
+		if [ -e "$PREFIX/$d" ] && [ ! -e "$NEW/$d" ]; then
+			cp -a "$PREFIX/$d" "$NEW/$d" || fail "could not carry $d into the new version"
+		fi
+	done
+
+	# Dependencies only need reinstalling when they actually changed; comparing
+	# the manifests avoids a slow, network-dependent npm run on every update.
+	if ! cmp -s "$PREFIX/package.json" "$NEW/package.json"; then
+		say "dependencies changed; installing"
+		set_status running "Installing dependencies..."
+		( cd "$NEW" && npm install --omit=dev --no-audit --no-fund >>"$LOG" 2>&1 ) ||
+			fail "the new version's dependencies could not be installed"
+	fi
+
+	# better-sqlite3 is a native module that has to be compiled for this machine.
+	# On musl there is usually no prebuilt binary, so a dependency install can
+	# "succeed" and still leave a module that won't load - and the first thing
+	# that would notice is the new version failing to boot. Checking it here
+	# turns that into a refusal with the old version still running, instead of a
+	# swap, a failed start and a ninety-second rollback.
+	if ! ( cd "$NEW" && node -e "require('better-sqlite3')" >>"$LOG" 2>&1 ); then
+		fail "the database driver could not be loaded for this machine, so the update was not installed"
+	fi
+
+	chown -R root:root "$NEW" 2>/dev/null || true
+	chmod 0755 "$NEW"/opennas-* 2>/dev/null || true
+	chmod 0755 "$NEW"/*.sh 2>/dev/null || true
+
+	set_status running "Switching over..."
+	rm -rf "$OLD"
+	mv "$PREFIX" "$OLD" || fail "could not set the current version aside"
+	if ! mv "$NEW" "$PREFIX"; then
+		# Put it back rather than leaving the machine with no OpenNAS at all.
+		mv "$OLD" "$PREFIX" 2>/dev/null || true
+		fail "could not move the new version into place"
+	fi
+	say "swapped in $(cat "$PREFIX/VERSION" 2>/dev/null || echo unknown)"
+
+	# Service files live outside the payload, so they are refreshed separately.
+	for f in opennas.openrc:/etc/init.d/opennas \
+		opennas-tls.openrc:/etc/init.d/opennas-tls \
+		opennas-firewall.openrc:/etc/init.d/opennas-firewall \
+		opennas-banner.openrc:/etc/init.d/opennas-banner; do
+		src="$PREFIX/service/${f%%:*}"; dst="${f#*:}"
+		[ -f "$src" ] && install -m 0755 "$src" "$dst" 2>/dev/null || true
+	done
+	[ -f "$PREFIX/service/nginx-opennas.conf" ] &&
+		install -m 0644 "$PREFIX/service/nginx-opennas.conf" /etc/nginx/http.d/opennas.conf 2>/dev/null || true
+	[ -f "$PREFIX/service/opennas-avahi.service" ] &&
+		install -m 0644 "$PREFIX/service/opennas-avahi.service" /etc/avahi/services/opennas.service 2>/dev/null || true
+	[ -f "$PREFIX/opennas-cli" ] &&
+		install -m 0755 "$PREFIX/opennas-cli" /usr/sbin/opennas 2>/dev/null || true
+
+	rc-service opennas restart >>"$LOG" 2>&1 || say "restart command returned non-zero"
+	rc-service nginx reload >>"$LOG" 2>&1 || true
+
+	# Wait for the new version to actually answer. A version that installs but
+	# won't start is the failure this whole dance exists to survive: on a
+	# headless NAS there is no console to fix it from.
+	#
+	# Bounded by the wall clock rather than by a count of iterations. Counting
+	# assumes each probe costs what we asked for, and GNU wget retries twenty
+	# times by default - so on a machine with GNU wget rather than busybox's, a
+	# "90 second" window was really twenty minutes of the NAS being down before
+	# anything rolled back. health_probe below makes each attempt a single one,
+	# and this makes the total honest even if one hangs anyway.
+	deadline=$(( $(date +%s) + HEALTH_TIMEOUT ))
+	while [ "$(date +%s)" -lt "$deadline" ]; do
+		if health_probe; then
+			set_status ok "Updated to $(cat "$PREFIX/VERSION" 2>/dev/null || echo 'the new version')."
+			say "new version is answering; keeping it"
+			rm -rf "$OLD"
+			exit 0
+		fi
+		sleep 3
+	done
+
+	say "new version never answered after ${HEALTH_TIMEOUT}s; rolling back"
+	do_rollback "The update was installed but never started, so the previous version was put back."
+}
+
+do_rollback() {
+	reason="${1:-Rolled back on request.}"
+	[ -d "$OLD" ] || fail "there is no previous version to go back to"
+	rm -rf "$NEW"
+	mv "$PREFIX" "$NEW" 2>/dev/null || true
+	if ! mv "$OLD" "$PREFIX"; then
+		mv "$NEW" "$PREFIX" 2>/dev/null || true
+		fail "could not restore the previous version"
+	fi
+	rm -rf "$NEW"
+	rc-service opennas restart >/dev/null 2>&1 || true
+	rc-service nginx reload >/dev/null 2>&1 || true
+	set_status rolled_back "$reason"
+	say "rolled back: $reason"
+	exit 0
+}
+
+case "${1:-}" in
+apply)
+	bundle="${2:?usage: opennas-update apply <bundle.tar.gz> <bundle.sig>}"
+	sig="${3:?usage: opennas-update apply <bundle.tar.gz> <bundle.sig>}"
+	mkdir -p "$STATE_DIR"
+
+	# Re-exec from a private copy, detached from whoever called us. Two reasons:
+	# the tree this script lives in is about to be renamed, and the service that
+	# invoked us is about to be restarted - staying attached to either would end
+	# the update halfway.
+	if [ "${OPENNAS_UPDATE_DETACHED:-}" != "1" ]; then
+		self="$(mktemp /tmp/opennas-update.XXXXXX)"
+		cat "$0" > "$self"
+		chmod 0700 "$self"
+		set_status running "Starting..."
+		OPENNAS_UPDATE_DETACHED=1 setsid "$self" apply "$bundle" "$sig" >>"$LOG" 2>&1 &
+		echo "started"
+		exit 0
+	fi
+
+	do_apply "$bundle" "$sig"
+	;;
+rollback)
+	do_rollback "Rolled back on request."
+	;;
+status)
+	[ -f "$STATUS" ] && cat "$STATUS" || echo "idle||"
+	;;
+*)
+	echo "usage: opennas-update {apply <bundle.tar.gz> <bundle.sig>|rollback|status}" >&2
+	exit 1
+	;;
+esac

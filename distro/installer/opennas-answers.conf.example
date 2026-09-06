@@ -1,0 +1,48 @@
+# OpenNAS unattended install - example answer file.
+#
+# Copy this to the root of a USB stick (or the ISO's contents) as
+#   opennas-answers.conf
+# and the installer will find it automatically and run without prompting.
+# You can also point at it explicitly:  opennas-install --answers /path/to/file
+#
+# Format is plain KEY=value. It is parsed, never executed, so shell syntax
+# (command substitution, variable expansion) is NOT supported here.
+# Lines starting with # are ignored. Quotes around values are optional.
+
+# --- required for a no-prompt install --------------------------------------
+# Without this the file is still read, but you'll be asked to confirm each step.
+UNATTENDED=yes
+
+# The admin password. Required when UNATTENDED=yes, since there's no prompt.
+# This is a plain-text password in a file - treat the media accordingly, and
+# change the password after the first boot if the stick isn't under your control.
+ADMIN_PASSWORD=change-me-please
+
+# --- disks ------------------------------------------------------------------
+# MODE=single uses one disk; MODE=raid1 mirrors across exactly two.
+MODE=single
+TARGET=/dev/sda
+# For MODE=raid1 instead:
+# RAID_DISKS=/dev/sda /dev/sdb
+
+# split = a system partition plus a separate one for your data, mounted at
+#         /var/lib/opennas. Reinstalling the OS then doesn't touch the shares.
+# whole = one partition for everything.
+DISK_LAYOUT=split
+SYSTEM_SIZE=32G
+
+# --- identity ---------------------------------------------------------------
+HOSTNAME=opennas
+ADMIN_USER=admin
+
+# --- console keyboard -------------------------------------------------------
+# Applied to the live installer console immediately and to the installed system.
+# KEYMAP is the layout; KEYMAP_VARIANT defaults to KEYMAP when omitted.
+#   us / us          gb / gb          de / de-nodeadkeys
+#   fr / fr-latin9   es / es          it / it
+KEYMAP=us
+KEYMAP_VARIANT=us
+
+# Seconds to wait before erasing the disks, so an unattended boot can still be
+# aborted with Ctrl-C. Set to 0 to start immediately.
+CONFIRM_DELAY=10

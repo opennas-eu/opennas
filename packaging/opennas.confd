@@ -1,0 +1,27 @@
+# OpenNAS service configuration - sourced by the OpenRC init script
+# (/etc/init.d/opennas). Variables are exported into the backend's environment.
+#
+# See the source for every supported var; the important ones for an appliance:
+
+export NODE_ENV=production
+
+# The backend binds locally; nginx (port 80) fronts it and proxies /api + /api/ws.
+export OPENNAS_HOST=127.0.0.1
+export OPENNAS_PORT=4174
+
+# Persistent state (SQLite DB, session secret, avatars, generated configs, shares).
+export OPENNAS_DATA_DIR=/var/lib/opennas
+export OPENNAS_FILES_ROOT=/var/lib/opennas/shared
+
+# Passkeys (WebAuthn) need the public origin the browser actually sees. Set these
+# to your real hostname once you have one, and enable Secure cookies behind HTTPS:
+#export OPENNAS_RP_ID=nas.local
+#export OPENNAS_ORIGIN=https://nas.local
+#export OPENNAS_COOKIE_SECURE=true
+
+# Where OpenNAS writes the generated Samba/NFS configs on the host:
+#export OPENNAS_SMB_CONF=/etc/samba/smb.conf
+#export OPENNAS_NFS_EXPORTS=/etc/exports
+
+# Real OS integration (later slice): demo (safe default) | linux
+#export OPENNAS_SYSTEM_MODE=linux

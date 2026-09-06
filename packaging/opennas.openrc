@@ -1,0 +1,31 @@
+#!/sbin/openrc-run
+# OpenNAS backend service (Alpine / OpenRC).
+# Config lives in /etc/conf.d/opennas (sourced automatically by OpenRC).
+
+name="OpenNAS"
+description="OpenNAS web NAS backend"
+
+: "${OPENNAS_DIR:=/usr/lib/opennas}"
+: "${OPENNAS_USER:=opennas}"
+: "${OPENNAS_GROUP:=opennas}"
+: "${OPENNAS_DATA_DIR:=/var/lib/opennas}"
+
+command="/usr/bin/node"
+command_args="${OPENNAS_DIR}/server/index.js"
+command_user="${OPENNAS_USER}:${OPENNAS_GROUP}"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/opennas.log"
+error_log="/var/log/opennas.log"
+
+depend() {
+	need net
+	use dns logger
+	after firewall
+}
+
+start_pre() {
+	# Make sure the data dir exists and is owned by the service user.
+	checkpath -d -m 0750 -o "${OPENNAS_USER}:${OPENNAS_GROUP}" "${OPENNAS_DATA_DIR}"
+	checkpath -f -m 0640 -o "${OPENNAS_USER}:${OPENNAS_GROUP}" "${output_log}"
+}

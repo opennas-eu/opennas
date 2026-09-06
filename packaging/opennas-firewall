@@ -1,0 +1,106 @@
+#!/bin/sh
+# Privileged firewall helper. The backend runs unprivileged and reaches this
+# through doas (see /etc/doas.d/opennas.conf), which allow-lists this exact path.
+#
+#   opennas-firewall apply <file>   load a ruleset (validated first) and persist it
+#   opennas-firewall disable        flush our table; the host stops filtering
+#   opennas-firewall status         "active" | "inactive" | "unavailable"
+#   opennas-firewall ban <ip> <s>   drop traffic from <ip> for <s> seconds
+#   opennas-firewall unban <ip>     lift a ban early
+#   opennas-firewall bans           list currently banned addresses
+#
+# The ruleset is validated with `nft -c` before anything is loaded: a syntax
+# error that took the box off the network would be unrecoverable without
+# physical access.
+set -eu
+
+# Our own file, loaded by our own OpenRC service. Alpine's /etc/nftables.d is
+# read by Alpine's `nftables` service, which also installs a default-drop
+# `inet filter` table - enabling that to persist our rules left the machine
+# unreachable after the next reboot even once our rules were removed.
+RULES=/etc/opennas/firewall.nft
+SERVICE=opennas-firewall
+
+have_nft() { command -v nft >/dev/null 2>&1; }
+
+case "${1:-}" in
+apply)
+	file="${2:?usage: opennas-firewall apply <file>}"
+	[ -f "$file" ] || { echo "no such ruleset: $file" >&2; exit 1; }
+	have_nft || { echo "nftables is not installed" >&2; exit 2; }
+	nft -c -f "$file" || { echo "ruleset failed validation; nothing was loaded" >&2; exit 3; }
+	nft -f "$file"
+	# Persist for the next boot. Written only after a successful load, so a
+	# ruleset that bricks the network can never be the one that comes back.
+	mkdir -p "$(dirname "$RULES")"
+	cp "$file" "$RULES"
+	chmod 0644 "$RULES"
+	rc-update add "$SERVICE" default 2>/dev/null || true
+	;;
+disable)
+	have_nft || exit 0
+	# Drop only our own table: Docker and libvirt keep theirs elsewhere, and
+	# flushing the whole ruleset would silently break container networking.
+	nft delete table inet opennas 2>/dev/null || true
+	rm -f "$RULES"
+	# And stop loading anything at boot. Leaving the service enabled with no
+	# ruleset is harmless, but leaving it enabled is how "I turned the firewall
+	# off" turned into "the NAS is unreachable after a reboot".
+	rc-update del "$SERVICE" default 2>/dev/null || true
+	;;
+status)
+	if ! have_nft; then echo unavailable; exit 0; fi
+	if nft list table inet opennas >/dev/null 2>&1; then echo active; else echo inactive; fi
+	;;
+ban)
+	# ban <ip> <seconds> - add to the timed set the input chain drops on.
+	#
+	# The set carries the timeout, so the kernel lifts the ban itself; nothing
+	# here has to run again, and OpenNAS being stopped cannot leave someone
+	# blocked forever. Validation is strict because this string is written into
+	# an nft command.
+	ip="${2:?usage: opennas-firewall ban <ip> <seconds>}"
+	secs="${3:-3600}"
+	have_nft || { echo "nftables is not installed" >&2; exit 2; }
+	case "$secs" in ''|*[!0-9]*) echo "invalid duration" >&2; exit 1;; esac
+	[ "$secs" -ge 1 ] && [ "$secs" -le 604800 ] || { echo "duration out of range" >&2; exit 1; }
+	case "$ip" in
+	*:*) # IPv6
+		case "$ip" in *[!0-9A-Fa-f:.]*) echo "invalid address" >&2; exit 1;; esac
+		set_name=banned6 ;;
+	*)  # IPv4
+		case "$ip" in *[!0-9.]*) echo "invalid address" >&2; exit 1;; esac
+		set_name=banned4 ;;
+	esac
+	nft list table inet opennas >/dev/null 2>&1 || {
+		echo "the OpenNAS firewall is not active, so there is nothing to ban with" >&2; exit 4; }
+	nft add element inet opennas "$set_name" "{ $ip timeout ${secs}s }" || {
+		echo "could not add the ban" >&2; exit 5; }
+	echo "banned $ip for ${secs}s"
+	;;
+unban)
+	ip="${2:?usage: opennas-firewall unban <ip>}"
+	have_nft || exit 0
+	case "$ip" in
+	*:*) case "$ip" in *[!0-9A-Fa-f:.]*) echo "invalid address" >&2; exit 1;; esac; set_name=banned6 ;;
+	*)   case "$ip" in *[!0-9.]*) echo "invalid address" >&2; exit 1;; esac; set_name=banned4 ;;
+	esac
+	# Not an error if it had already expired - the end state is what was asked.
+	nft delete element inet opennas "$set_name" "{ $ip }" 2>/dev/null || true
+	echo "unbanned $ip"
+	;;
+bans)
+	have_nft || exit 0
+	nft list table inet opennas >/dev/null 2>&1 || exit 0
+	# One address per line, with whatever timeout remains.
+	for set_name in banned4 banned6; do
+		nft -a list set inet opennas "$set_name" 2>/dev/null |
+			sed -n 's/.*elements = {\(.*\)}.*/\1/p' |
+			tr ',' '\n' | sed 's/^ *//; s/ *$//' | grep -v '^$' || true
+	done
+	;;
+*)
+	echo "usage: opennas-firewall {apply <file>|disable|status|ban <ip> <seconds>|unban <ip>|bans}" >&2
+	exit 1
+	;;
+esac

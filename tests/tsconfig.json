@@ -1,0 +1,23 @@
+{
+  "extends": "../tsconfig.base.json",
+  "compilerOptions": {
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    // @types/node lives with the API rather than at the root - this directory is
+    // not a workspace package, deliberately, so that adding it does not require
+    // regenerating the lockfile the CI install pins.
+    "typeRoots": ["../apps/api/node_modules/@types", "../apps/web/node_modules/@types"],
+    "noEmit": true,
+    "declaration": false,
+    "sourceMap": false,
+    // Tests reach across into the API and the web app, both of which are written
+    // for NodeNext and name the emitted `.js` files. The runtime hook in
+    // hooks.mjs maps those onto the sources; this is the compile-time half of the
+    // same arrangement.
+    "allowImportingTsExtensions": true,
+    "allowJs": false,
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": ["**/*.ts", "**/*.mts"]
+}
