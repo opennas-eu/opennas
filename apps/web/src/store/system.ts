@@ -35,8 +35,15 @@ export const useSystem = create<SystemStore>((set, get) => ({
     const refCount = Math.max(0, get().refCount - 1);
     set({ refCount });
     if (refCount === 0) {
-      get().socket?.close();
+      const ws = get().socket;
       set({ socket: null, connected: false });
+      // Detach before closing: the close event arrives later, possibly after a
+      // new socket has been opened (React StrictMode unmounts and remounts
+      // immediately), and this one must not touch the store by then.
+      if (ws) {
+        ws.onopen = ws.onmessage = ws.onerror = ws.onclose = null;
+        ws.close();
+      }
     }
   },
 }));
@@ -48,12 +55,19 @@ function open(set: SetFn, get: GetFn): void {
   const ws = new WebSocket(apiWsUrl("/ws"));
   set({ socket: ws });
 
+  // Every handler checks it still belongs to the current socket. A superseded
+  // one's late events must not mark the store connected, feed it stale data,
+  // or - worst - null out its replacement and orphan it.
+  const current = () => get().socket === ws;
+
   ws.onopen = () => {
+    if (!current()) return;
     set({ connected: true });
     ws.send(JSON.stringify({ type: "subscribe", channel: "system" }));
   };
 
   ws.onmessage = (ev) => {
+    if (!current()) return;
     let msg: ServerMessage;
     try {
       msg = JSON.parse(ev.data);
@@ -75,6 +89,7 @@ function open(set: SetFn, get: GetFn): void {
   };
 
   ws.onclose = () => {
+    if (!current()) return;
     set({ connected: false, socket: null });
     // Reconnect with backoff while consumers are still mounted.
     if (get().refCount > 0) {

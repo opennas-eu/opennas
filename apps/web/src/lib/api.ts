@@ -1,4 +1,5 @@
 import type { ApiError } from "@opennas/shared";
+import { tr } from "../i18n/index.ts";
 
 /**
  * Base URL of the backend API. Defaults to the same origin (`/api`), so the
@@ -36,7 +37,7 @@ export class ApiRequestError extends Error {
   readonly fields?: Record<string, string>;
 
   constructor(status: number, body: ApiError) {
-    super(body.message || body.error || `Request failed (${status})`);
+    super(body.message || body.error || tr("ui.api.requestFailed", { status }));
     this.name = "ApiRequestError";
     this.status = status;
     this.code = body.error;
@@ -55,14 +56,33 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   if (res.status === 204) return undefined as T;
 
   const text = await res.text();
-  const data = text ? JSON.parse(text) : undefined;
+  // Not every response is ours: a reverse proxy's 502 page or a captive portal
+  // answers in HTML, and a SyntaxError from JSON.parse would hide the status.
+  let data: unknown;
+  let parsed = true;
+  try {
+    data = text ? JSON.parse(text) : undefined;
+  } catch {
+    parsed = false;
+  }
 
   if (!res.ok) {
     const err: ApiError =
       data && typeof data === "object" && "error" in data
         ? (data as ApiError)
-        : { error: "http_error", message: `Request failed (${res.status})` };
+        : {
+            error: "http_error",
+            message: res.status >= 502 && res.status <= 504
+              ? tr("ui.api.unreachable", { status: res.status })
+              : tr("ui.api.requestFailed", { status: res.status }),
+          };
     throw new ApiRequestError(res.status, err);
+  }
+  if (!parsed) {
+    throw new ApiRequestError(res.status, {
+      error: "bad_response",
+      message: tr("ui.api.badResponse", { status: res.status }),
+    });
   }
   return data as T;
 }
