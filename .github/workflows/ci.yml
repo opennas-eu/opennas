@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# Read-only token: CI checks code, it never writes to the repository.
+permissions:
+  contents: read
+
+# A second push to the same branch cancels the first: nobody reads the results
+# of a run against a commit that has already been replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+# Actions are pinned to commit SHAs (tag in the trailing comment) so a moved
+# tag cannot change what runs here.
+jobs:
+  check:
+    name: Typecheck, build and test
+    runs-on: ubuntu-latest
+    # This repository is the system itself (opennas/ in the OpenNAS checkout —
+    # see STRUCTURE.md). The SDK has its own repository and CI; the repo server
+    # and the website are built separately.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      # Covers the test suite too: `tests/` is typechecked with the root
+      # compiler rather than as a workspace package, so that adding it did not
+      # require regenerating the lockfile this job installs with --frozen-lockfile.
+      - name: Typecheck
+        run: pnpm typecheck
+
+      # Before the tests: a suite that passes against sources which don't build
+      # is not telling anyone anything useful.
+      - name: Build
+        run: pnpm build
+
+      # Includes tests/system, which runs the real packaging scripts and the real
+      # privileged updater against a throwaway install under /tmp. Everything
+      # they need — openssl, tar, sh — is on the runner already, and the ones
+      # that need hardware this machine hasn't got skip themselves.
+      - name: Test
+        run: pnpm test
+
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # Advisory for now (continue-on-error): the packaging and distro scripts
+      # are being cleaned up, and a check that is red from day one gets ignored.
+      # Make it blocking once it passes. Covers *.sh plus the extension-less
+      # helpers (opennas-cli, opennas-update, ...) identified by their shebang;
+      # OpenRC service files (#!/sbin/openrc-run) are not plain sh and are skipped.
+      - name: shellcheck packaging/ and distro/
+        continue-on-error: true
+        run: |
+          files=$(
+            for f in packaging/* distro/*.sh distro/installer/* distro/mkimage/*; do
+              [ -f "$f" ] || continue
+              case "$f" in
+                *.sh) echo "$f" ;;
+                *) head -n1 "$f" | grep -Eq '^#!(/usr/bin/env (ba)?sh|/bin/(ba)?sh)' && echo "$f" ;;
+              esac
+            done
+          )
+          echo "Checking:"; echo "$files"
+          # shellcheck is preinstalled on ubuntu-latest runners.
+          shellcheck --external-sources $files
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      # Advisory, not blocking. A high-severity advisory in a transitive
+      # dependency can land at any hour, and a red build that nobody can fix
+      # teaches people to ignore red builds. It is reported so somebody looks.
+      - name: pnpm audit
+        run: pnpm audit --audit-level=high || echo "::warning::pnpm audit reported advisories — see the log"
