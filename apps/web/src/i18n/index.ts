@@ -178,6 +178,15 @@ export function translate(locale: string, key: MessageKey, params?: Params): str
 }
 
 /**
+ * Translate in the current locale, for code outside React (stores, the app
+ * bridge, notifications). Reads the locale when called, so it does not
+ * re-render anything on a language change - use `useT()` in components.
+ */
+export function tr(key: MessageKey, params?: Params): string {
+  return translate(useI18n.getState().locale, key, params);
+}
+
+/**
  * The translation function for components.
  *
  * Subscribes to the locale, so changing language re-renders everything using it

@@ -16,6 +16,7 @@ import { confirmDialog } from "../../store/dialogs.ts";
 import { useIsPhone } from "../../lib/viewport.ts";
 
 export function Taskbar() {
+  const t = useT();
   const windows = useWindows((s) => s.windows);
   const setSearch = useWindows((s) => s.setSearch);
   const focusedId = useWindows((s) => s.focusedId);
@@ -38,7 +39,7 @@ export function Taskbar() {
           "flex h-9 items-center gap-2 rounded-lg px-3 text-sm font-medium transition-colors",
           launcherOpen ? "bg-white/20" : "hover:bg-white/10",
         )}
-        title="Main menu"
+        title={t("ui.taskbar.mainMenu")}
       >
         <LayoutGrid size={18} />
         <span className="hidden sm:inline">{instanceName}</span>
@@ -64,7 +65,7 @@ export function Taskbar() {
               {w.badge !== null && (
                 <span
                   className="absolute -right-1.5 -top-1 min-w-3.5 rounded-full bg-rose-500 px-1 text-[9px] font-semibold leading-[14px] text-white ring-1 ring-slate-900/20"
-                  title={`${w.badge} waiting`}
+                  title={t("ui.taskbar.badge", { count: w.badge })}
                 >
                   {w.badge > 99 ? "99+" : w.badge}
                 </span>
@@ -82,8 +83,8 @@ export function Taskbar() {
       <button
         onClick={() => setSearch(true)}
         className="grid h-9 w-9 place-items-center rounded-lg transition-colors hover:bg-white/10"
-        title="Search (Ctrl+K)"
-        aria-label="Search"
+        title={t("ui.taskbar.searchShortcut")}
+        aria-label={t("desktop.search")}
       >
         <Search size={18} />
       </button>
@@ -263,6 +264,7 @@ function AppSwitcher({ onClose }: { onClose: () => void }) {
 }
 
 function SystemIndicator() {
+  const t = useT();
   const latest = useSystem((s) => s.latest);
   const openApp = useWindows((s) => s.openApp);
   const monitor = useApps((s) => s.byId("system-monitor"));
@@ -273,7 +275,7 @@ function SystemIndicator() {
     <button
       onClick={() => monitor && openApp(monitor)}
       className="hidden items-center gap-3 rounded-lg px-2.5 py-1 text-xs hover:bg-white/10 lg:flex"
-      title="Open Resource Monitor"
+      title={t("ui.taskbar.openMonitor")}
     >
       <span className="flex items-center gap-1">
         <Cpu size={14} className="text-emerald-300" />
@@ -300,20 +302,20 @@ function UserMenu({ compact }: { compact?: boolean } = {}) {
   const push = useNotifications((s) => s.push);
   const isAdmin = user?.role === "admin";
   async function power(action: "reboot" | "poweroff") {
-    const label = action === "reboot" ? "restart" : "shut down";
+    const reboot = action === "reboot";
     const ok = await confirmDialog({
-      title: `${label === "restart" ? "Restart" : "Shut down"} the NAS?`,
-      message: `The system will ${label} now. You'll lose connection until it's back${action === "reboot" ? " up" : " on"}.`,
-      confirmLabel: label === "restart" ? "Restart" : "Shut down",
+      title: reboot ? t("ui.power.restartTitle") : t("ui.power.shutDownTitle"),
+      message: reboot ? t("ui.power.restartMessage") : t("ui.power.shutDownMessage"),
+      confirmLabel: reboot ? t("ui.power.restart") : t("ui.power.shutDown"),
       danger: true,
     });
     if (!ok) return;
     setOpen(false);
     try {
       await api.post(`/admin/power/${action}`);
-      push({ level: "info", title: `The NAS is ${action === "reboot" ? "restarting" : "shutting down"}...` });
+      push({ level: "info", title: reboot ? t("ui.power.restarting") : t("ui.power.shuttingDown") });
     } catch {
-      push({ level: "warning", title: `Could not ${label} the NAS.` });
+      push({ level: "warning", title: reboot ? t("ui.power.restartFailed") : t("ui.power.shutDownFailed") });
     }
   }
 

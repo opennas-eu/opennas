@@ -1,6 +1,5 @@
-import { createReadStream } from "node:fs";
-import { cp, lstat, mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { createWriteStream } from "node:fs";
+import { constants as fsConstants, createReadStream } from "node:fs";
+import { cp, lstat, mkdir, open, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { pipeline } from "node:stream/promises";
 import { basename, dirname, extname, join } from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
@@ -21,7 +20,7 @@ import { hashPassword } from "../auth/password.js";
 import { ArchiveError, buildZip, extractZip } from "./archive.js";
 import { emptyTrash, getTrashRow, listTrash, moveToTrash, purgeTrashItem, restoreFromTrash } from "./trash.js";
 import { createLink, getLink, listLinks, removeLink } from "../db/share-links.js";
-import { accessibleShareNames, pathAccess } from "./access.js";
+import { accessibleShareNames, pathAccess, subtreeDenial, subtreeReadFilter } from "./access.js";
 import { mimeOf, isInlineSafe } from "./mime.js";
 import { DEFAULT_THUMB_SIZE, getThumbnail, isThumbable, ThumbError } from "./thumbs.js";
 import {
@@ -229,13 +228,19 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
   const renameSchema = z.object({ path: z.string(), newName: z.string() });
   app.post("/rename", async (req, reply) => {
     const body = renameSchema.parse(req.body);
-    if (!pathAccess(req.auth!.user, body.path).write) {
-      return reply.code(403).send({ error: "forbidden", message: "You don't have write access here." });
-    }
-    const newName = validateName(body.newName);
     if (isShareRoot(body.path)) {
       return reply.code(400).send({ error: "bad_path", message: "Rename shared folders in Control Panel → Shared Folders." });
     }
+    // Renaming changes the parent's listing as much as the item, and moves
+    // everything below it to a new path - same rule as a move.
+    if (
+      !pathAccess(req.auth!.user, body.path).write ||
+      !pathAccess(req.auth!.user, parentOf(body.path)).write ||
+      (await subtreeDenial(req.auth!.user, body.path, "write"))
+    ) {
+      return reply.code(403).send({ error: "forbidden", message: "You don't have write access here." });
+    }
+    const newName = validateName(body.newName);
     const src = resolveSafe(body.path);
     const dest = join(dirname(src), newName);
     if (await exists(dest)) {
@@ -248,17 +253,30 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
   // ---- Copy / Move ------------------------------------------------------
   const transferSchema = z.object({ path: z.string(), toDir: z.string() });
 
-  /** Resolve a transfer and pick a destination path, avoiding collisions for copy. */
+  /**
+   * Resolve a transfer and pick a destination path, avoiding collisions for copy.
+   *
+   * Both need read on the source and write into the destination directory. A
+   * move also takes the source away from where it was, so it is a delete there:
+   * write on the source's parent, and on everything below the source - a folder
+   * rule making a subfolder read-only must not be stepped around by moving its
+   * parent somewhere the rule doesn't reach.
+   */
   async function planTransfer(
     req: FastifyRequest,
     reply: FastifyReply,
-    uniquify: boolean,
-  ): Promise<{ src: string; dest: string } | null> {
+    mode: "copy" | "move",
+  ): Promise<{ src: string; dest: string; srcVirtual: string } | null> {
     const body = transferSchema.parse(req.body);
+    const user = req.auth!.user;
     const srcVirtual = normalizeVirtual(body.path);
     const toDirVirtual = normalizeVirtual(body.toDir);
-    // Need read on the source and write into the destination directory.
-    if (!pathAccess(req.auth!.user, srcVirtual).read || !pathAccess(req.auth!.user, toDirVirtual).write) {
+    const allowed =
+      pathAccess(user, srcVirtual).read &&
+      pathAccess(user, toDirVirtual).write &&
+      (mode === "copy" ||
+        (pathAccess(user, parentOf(srcVirtual)).write && !(await subtreeDenial(user, srcVirtual, "write"))));
+    if (!allowed) {
       reply.code(403).send({ error: "forbidden", message: "You don't have access to do that." });
       return null;
     }
@@ -281,24 +299,31 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     const name = basename(src);
     let dest = join(destDir, name);
     if (await exists(dest)) {
-      if (!uniquify) {
+      if (mode === "move") {
         reply.code(409).send({ error: "exists", message: "An item with that name already exists there." });
         return null;
       }
       dest = await uniqueName(destDir, name); // "file (copy).txt", "file (copy 2).txt"...
     }
-    return { src, dest };
+    return { src, dest, srcVirtual };
   }
 
   app.post("/copy", async (req, reply) => {
-    const plan = await planTransfer(req, reply, true);
+    const plan = await planTransfer(req, reply, "copy");
     if (!plan) return reply;
-    await cp(plan.src, plan.dest, { recursive: true, errorOnExist: false });
+    // Subfolders the user can't read are left behind rather than copied to
+    // somewhere their folder rules don't follow.
+    const readable = subtreeReadFilter(req.auth!.user, plan.srcVirtual, plan.src);
+    await cp(plan.src, plan.dest, {
+      recursive: true,
+      errorOnExist: false,
+      ...(readable ? { filter: (from: string) => readable(from) } : {}),
+    });
     return { ok: true, path: toVirtual(plan.dest) };
   });
 
   app.post("/move", async (req, reply) => {
-    const plan = await planTransfer(req, reply, false);
+    const plan = await planTransfer(req, reply, "move");
     if (!plan) return reply;
     await rename(plan.src, plan.dest);
     return { ok: true, path: toVirtual(plan.dest) };
@@ -338,16 +363,24 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
   // ---- Archives (zip / unzip) ------------------------------------------
   app.post("/compress", async (req, reply) => {
     const body = z.object({ dir: z.string(), names: z.array(z.string()).min(1).max(1000), name: z.string().min(1) }).parse(req.body);
-    if (!pathAccess(req.auth!.user, body.dir).write) {
+    const user = req.auth!.user;
+    if (!pathAccess(user, body.dir).write) {
       return reply.code(403).send({ error: "forbidden", message: "You don't have write access here." });
     }
-    const dir = resolveSafe(body.dir);
+    const dirVirtual = normalizeVirtual(body.dir);
+    const dir = resolveSafe(dirVirtual);
     const zipName = validateName(body.name.toLowerCase().endsWith(".zip") ? body.name : `${body.name}.zip`);
-    const reals = body.names.map((n) => join(dir, validateName(n)));
+    const names = body.names.map((n) => validateName(n));
+    // Write on the folder says nothing about reading what's in it: a folder rule
+    // can close one item to this user while leaving its siblings writable.
+    if (names.some((n) => !pathAccess(user, `${dirVirtual}/${n}`).read)) {
+      return reply.code(403).send({ error: "forbidden", message: "You don't have access to everything you selected." });
+    }
+    const reals = names.map((n) => join(dir, n));
     const dest = join(dir, zipName);
     if (await exists(dest)) return reply.code(409).send({ error: "exists", message: "An archive with that name already exists." });
     try {
-      await writeFile(dest, await buildZip(reals));
+      await writeFile(dest, await buildZip(reals, subtreeReadFilter(user, dirVirtual, dir) ?? undefined));
     } catch (err) {
       if (err instanceof ArchiveError) return reply.code(400).send({ error: "zip_failed", message: err.message });
       throw err;
@@ -361,6 +394,9 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     const parentVirtual = normalizeVirtual(body.path.slice(0, body.path.lastIndexOf("/")) || "/");
     if (!pathAccess(req.auth!.user, parentVirtual).write) {
       return reply.code(403).send({ error: "forbidden", message: "You don't have write access here." });
+    }
+    if (!pathAccess(req.auth!.user, body.path).read) {
+      return reply.code(403).send({ error: "forbidden", message: "You don't have access to this archive." });
     }
     const zipReal = resolveSafe(body.path);
     const s = await lstat(zipReal).catch(() => null);
@@ -388,7 +424,7 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     if (!s?.isDirectory()) return reply.code(400).send({ error: "not_dir", message: "Only folders can be downloaded as a zip." });
     let zip: Uint8Array;
     try {
-      zip = await buildZip([real]);
+      zip = await buildZip([real], subtreeReadFilter(req.auth!.user, path, real) ?? undefined);
     } catch (err) {
       if (err instanceof ArchiveError) return reply.code(413).send({ error: "too_large", message: err.message });
       throw err;
@@ -404,7 +440,14 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
   app.delete("/", async (req, reply) => {
     const q = req.query as { path?: string; permanent?: string };
     const path = normalizeVirtual(q.path ?? "");
-    if (!pathAccess(req.auth!.user, path).write) {
+    // Deleting a folder deletes everything in it, so a read-only subfolder makes
+    // the whole delete a no; and the item disappears from its parent, so that
+    // has to be writable too.
+    if (
+      !pathAccess(req.auth!.user, path).write ||
+      (path !== "/" && !isShareRoot(path) && !pathAccess(req.auth!.user, parentOf(path)).write) ||
+      (await subtreeDenial(req.auth!.user, path, "write"))
+    ) {
       return reply.code(403).send({ error: "forbidden", message: "You don't have write access here." });
     }
     if (isShareRoot(path)) {
@@ -519,7 +562,24 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       const dest = join(dir, name);
       // Guard: the resolved destination must stay within the share root.
       resolveSafe(toVirtual(dest));
-      await pipeline(part.file, createWriteStream(dest));
+      // O_NOFOLLOW: an existing symlink at this name (left by SMB, NFS or an
+      // app) must not turn an upload into a write through it to wherever it
+      // points.
+      let handle;
+      try {
+        handle = await open(
+          dest,
+          fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_TRUNC | fsConstants.O_NOFOLLOW,
+          0o644,
+        );
+      } catch (err) {
+        part.file.resume();
+        if ((err as NodeJS.ErrnoException).code === "ELOOP") {
+          return reply.code(400).send({ error: "bad_path", message: `"${name}" is a link and can't be overwritten.` });
+        }
+        throw err;
+      }
+      await pipeline(part.file, handle.createWriteStream());
       if (part.file.truncated) {
         await rm(dest, { force: true });
         return reply.code(413).send({ error: "too_large", message: `"${name}" exceeds the upload size limit.` });
@@ -531,6 +591,12 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
     }
     return { ok: true, saved };
   });
+}
+
+/** The virtual folder containing a virtual path ("/" for a share root). */
+function parentOf(virtualPath: string): string {
+  const p = normalizeVirtual(virtualPath);
+  return normalizeVirtual(p.slice(0, p.lastIndexOf("/")) || "/");
 }
 
 async function exists(p: string): Promise<boolean> {

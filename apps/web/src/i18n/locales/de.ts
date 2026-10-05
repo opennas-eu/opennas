@@ -1,4 +1,7 @@
 import type { Catalogue } from "../index.ts";
+import { deApps } from "./de/apps.ts";
+import { deControlPanel } from "./de/control-panel.ts";
+import { deDesktop } from "./de/desktop.ts";
 
 /**
  * German translations.
@@ -173,4 +176,9 @@ export const de: Partial<Catalogue> = {
   // ---- Speicher -----------------------------------------------------------
   "storage.used": "{used} von {total}",
   "storage.diskCount": "{count} Festplatte|{count} Festplatten",
+
+  // ---- Pro Bereich ----------------------------------------------------------
+  ...deControlPanel,
+  ...deApps,
+  ...deDesktop,
 };

@@ -4,6 +4,7 @@ import type { AppRepo, RepoConfigResponse, RepoSourceStatus } from "@opennas/sha
 import { api, ApiRequestError } from "../../lib/api.ts";
 import { useNotifications } from "../../store/notifications.ts";
 import { Button, Input, Toggle } from "../ui/controls.tsx";
+import { useT } from "../../i18n/index.ts";
 
 /**
  * The configured app repositories.
@@ -22,6 +23,7 @@ export function RepoSettings({
   onChanged: () => Promise<void>;
   onClose: () => void;
 }) {
+  const t = useT();
   const push = useNotifications((s) => s.push);
   const [draft, setDraft] = useState<AppRepo[]>(repos);
   const [adding, setAdding] = useState("");
@@ -41,7 +43,7 @@ export function RepoSettings({
   function add() {
     const url = adding.trim().replace(/\/+$/, "");
     if (!url) return;
-    if (draft.some((r) => r.url === url)) { setError("That repository is already in the list."); return; }
+    if (draft.some((r) => r.url === url)) { setError(t("app.repo.duplicate")); return; }
     setDraft([...draft, { id: "", url, name: "", enabled: true }]);
     setAdding("");
     setError(null);
@@ -54,11 +56,11 @@ export function RepoSettings({
       await api.put<RepoConfigResponse>("/apps/repo", {
         repos: draft.map((r) => ({ url: r.url, name: r.name, enabled: r.enabled })),
       });
-      push({ level: "success", title: "Repositories updated" });
+      push({ level: "success", title: t("app.repo.updated") });
       await onChanged();
       onClose();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't save the repository list.");
+      setError(err instanceof ApiRequestError ? err.message : t("app.repo.saveFailed"));
     } finally {
       setBusy(false);
     }
@@ -68,15 +70,14 @@ export function RepoSettings({
     <div className="mb-3 rounded-xl bg-white p-3.5 ring-1 ring-slate-200">
       <div className="mb-1 flex items-center justify-between">
         <h4 className="flex items-center gap-1.5 text-sm font-semibold text-ink-soft">
-          <Store size={15} /> App repositories
+          <Store size={15} /> {t("app.repo.title")}
         </h4>
-        <button onClick={onClose} aria-label="Close" className="grid h-7 w-7 place-items-center rounded-lg text-ink-faint hover:bg-slate-100">
+        <button onClick={onClose} aria-label={t("desktop.close")} className="grid h-7 w-7 place-items-center rounded-lg text-ink-faint hover:bg-slate-100">
           <X size={15} />
         </button>
       </div>
       <p className="mb-3 text-xs text-ink-faint">
-        Checked in order. If two repositories publish the same app, the one higher up wins - and an app is only ever
-        updated from the repository it was installed from.
+        {t("app.repo.intro")}
       </p>
 
       <div className="space-y-1.5">
@@ -85,11 +86,11 @@ export function RepoSettings({
           return (
             <div key={r.url} className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-2 ring-1 ring-slate-200/70">
               <div className="flex flex-col">
-                <button onClick={() => move(i, -1)} disabled={i === 0} aria-label="Move up"
+                <button onClick={() => move(i, -1)} disabled={i === 0} aria-label={t("app.repo.moveUp")}
                         className="text-ink-faint transition hover:text-ink-soft disabled:opacity-25">
                   <ArrowUp size={12} />
                 </button>
-                <button onClick={() => move(i, 1)} disabled={i === draft.length - 1} aria-label="Move down"
+                <button onClick={() => move(i, 1)} disabled={i === draft.length - 1} aria-label={t("app.repo.moveDown")}
                         className="text-ink-faint transition hover:text-ink-soft disabled:opacity-25">
                   <ArrowDown size={12} />
                 </button>
@@ -97,16 +98,16 @@ export function RepoSettings({
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <span className="truncate text-sm font-medium text-ink-soft">{r.name || st?.name || new URL(r.url).host}</span>
-                  {i === 0 && r.enabled && <span className="rounded-full bg-brand-100 px-1.5 text-[10px] text-brand-700">primary</span>}
+                  {i === 0 && r.enabled && <span className="rounded-full bg-brand-100 px-1.5 text-[10px] text-brand-700">{t("app.repo.primary")}</span>}
                   {st && !st.reachable && (
                     <span className="inline-flex items-center gap-1 rounded-full bg-rose-50 px-1.5 text-[10px] text-rose-700 ring-1 ring-rose-200">
-                      <AlertTriangle size={9} /> unreachable
+                      <AlertTriangle size={9} /> {t("app.repo.unreachable")}
                     </span>
                   )}
                   {st?.reachable && (
                     <span className="text-[10px] text-ink-faint">
-                      {st.appCount} app{st.appCount === 1 ? "" : "s"}
-                      {st.shadowed > 0 ? ` - ${st.shadowed} hidden by a higher repo` : ""}
+                      {t("app.repo.appCount", { count: st.appCount })}
+                      {st.shadowed > 0 ? ` - ${t("app.repo.shadowed", { count: st.shadowed })}` : ""}
                     </span>
                   )}
                 </div>
@@ -115,10 +116,10 @@ export function RepoSettings({
               <Toggle
                 checked={r.enabled}
                 onChange={(v) => setDraft(draft.map((x, j) => (j === i ? { ...x, enabled: v } : x)))}
-                label={`Enable ${r.url}`}
+                label={t("app.center.enableItem", { name: r.url })}
               />
               <button
-                aria-label={`Remove ${r.url}`}
+                aria-label={t("app.repo.remove", { name: r.url })}
                 onClick={() => setDraft(draft.filter((_, j) => j !== i))}
                 className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ink-faint transition-colors hover:bg-rose-500 hover:text-white"
               >
@@ -138,7 +139,7 @@ export function RepoSettings({
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); add(); } }}
         />
         <Button variant="secondary" className="h-8 shrink-0 px-2.5 text-xs" onClick={add} disabled={!adding.trim()}>
-          <Plus size={13} /> Add
+          <Plus size={13} /> {t("common.add")}
         </Button>
       </div>
 
@@ -146,9 +147,9 @@ export function RepoSettings({
 
       <div className="mt-3 flex gap-2">
         <Button className="h-8 px-3 text-xs" loading={busy} onClick={save} disabled={draft.length === 0}>
-          <Check size={13} /> Save
+          <Check size={13} /> {t("common.save")}
         </Button>
-        <Button variant="ghost" className="h-8 px-3 text-xs" onClick={onClose}>Cancel</Button>
+        <Button variant="ghost" className="h-8 px-3 text-xs" onClick={onClose}>{t("common.cancel")}</Button>
       </div>
     </div>
   );

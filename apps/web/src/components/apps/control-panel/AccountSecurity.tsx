@@ -5,6 +5,7 @@ import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useAuth } from "../../../store/auth.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { Button, Field, Input } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
 
 /**
  * The two parts of Security that are about credentials rather than devices:
@@ -12,6 +13,7 @@ import { Button, Field, Input } from "../../ui/controls.tsx";
  */
 
 export function ChangePasswordPanel() {
+  const t = useT();
   const source = useAuth((s) => s.session?.user.source);
   const push = useNotifications((s) => s.push);
   const [current, setCurrent] = useState("");
@@ -26,7 +28,7 @@ export function ChangePasswordPanel() {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (next !== confirm) { setError("The two new passwords don't match."); return; }
+    if (next !== confirm) { setError(t("cp.password.mismatch")); return; }
     setBusy(true);
     setError(null);
     try {
@@ -37,13 +39,13 @@ export function ChangePasswordPanel() {
       setCurrent(""); setNext(""); setConfirm("");
       push({
         level: "success",
-        title: "Password changed",
+        title: t("cp.password.changed"),
         body: res.revokedSessions > 0
-          ? `Signed out ${res.revokedSessions} other device${res.revokedSessions === 1 ? "" : "s"}.`
+          ? t("cp.password.revoked", { count: res.revokedSessions })
           : undefined,
       });
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't change your password.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.password.failed"));
     } finally {
       setBusy(false);
     }
@@ -52,27 +54,28 @@ export function ChangePasswordPanel() {
   return (
     <div className="mt-8">
       <h3 className="mb-4 flex items-center gap-2 text-sm font-semibold text-ink-soft">
-        <KeyRound size={16} /> Password
+        <KeyRound size={16} /> {t("auth.password")}
       </h3>
       <form onSubmit={submit} className="max-w-sm space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
-        <Field label="Current password">
+        <Field label={t("cp.password.current")}>
           <Input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} autoComplete="current-password" />
         </Field>
-        <Field label="New password">
+        <Field label={t("cp.password.new")}>
           <Input type="password" value={next} onChange={(e) => setNext(e.target.value)} autoComplete="new-password" />
         </Field>
-        <Field label="Confirm new password">
+        <Field label={t("cp.password.confirm")}>
           <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
         </Field>
         {error && <p className="text-sm text-rose-600">{error}</p>}
-        <p className="text-xs text-ink-faint">Changing your password signs out your other devices.</p>
-        <Button type="submit" loading={busy} disabled={!current || !next}>Change password</Button>
+        <p className="text-xs text-ink-faint">{t("cp.password.hint")}</p>
+        <Button type="submit" loading={busy} disabled={!current || !next}>{t("cp.password.change")}</Button>
       </form>
     </div>
   );
 }
 
 export function TwoFactorPanel() {
+  const t = useT();
   const push = useNotifications((s) => s.push);
   const [status, setStatus] = useState<TotpStatus | null>(null);
   const [setup, setSetup] = useState<TotpSetupResponse | null>(null);
@@ -102,7 +105,7 @@ export function TwoFactorPanel() {
     try {
       setSetup(await api.post<TotpSetupResponse>("/auth/totp/setup", {}));
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't start setup.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.totp.setupFailed"));
     } finally {
       setBusy(false);
     }
@@ -116,9 +119,9 @@ export function TwoFactorPanel() {
       setCodes(res.recoveryCodes);
       reset();
       await load();
-      push({ level: "success", title: "Two-factor authentication is on" });
+      push({ level: "success", title: t("cp.totp.turnedOn") });
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't turn it on.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.totp.onFailed"));
     } finally {
       setBusy(false);
     }
@@ -132,9 +135,9 @@ export function TwoFactorPanel() {
       setCodes(null);
       reset();
       await load();
-      push({ level: "success", title: "Two-factor authentication is off" });
+      push({ level: "success", title: t("cp.totp.turnedOff") });
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't turn it off.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.totp.offFailed"));
     } finally {
       setBusy(false);
     }
@@ -149,7 +152,7 @@ export function TwoFactorPanel() {
       reset();
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't create new codes.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.totp.codesFailed"));
     } finally {
       setBusy(false);
     }
@@ -161,10 +164,10 @@ export function TwoFactorPanel() {
     <div className="mt-8">
       <div className="mb-4 flex items-center justify-between">
         <h3 className="flex items-center gap-2 text-sm font-semibold text-ink-soft">
-          <ShieldCheck size={16} /> Two-factor authentication
+          <ShieldCheck size={16} /> {t("cp.totp.title")}
         </h3>
         {status && !enabled && !setup && (
-          <Button className="h-8 px-3 py-0 text-xs" loading={busy} onClick={begin}>Set up</Button>
+          <Button className="h-8 px-3 py-0 text-xs" loading={busy} onClick={begin}>{t("cp.totp.setUp")}</Button>
         )}
       </div>
 
@@ -174,8 +177,7 @@ export function TwoFactorPanel() {
       {setup && (
         <div className="rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
           <p className="mb-3 text-sm text-ink-faint">
-            Scan this with an authenticator app - Aegis, Ente Auth, 1Password, Google Authenticator - then enter the code
-            it shows.
+            {t("cp.totp.scan")}
           </p>
           <div className="flex flex-wrap items-start gap-4">
             {/* Rendered server-side, so nothing is fetched and no script runs. */}
@@ -185,12 +187,12 @@ export function TwoFactorPanel() {
             />
             <div className="min-w-0 flex-1 space-y-3">
               <div>
-                <div className="mb-1 text-xs font-medium text-ink-soft">Can't scan? Enter this key instead</div>
+                <div className="mb-1 text-xs font-medium text-ink-soft">{t("cp.totp.cantScan")}</div>
                 <code className="block break-all rounded-lg bg-white px-2.5 py-2 font-mono text-xs text-ink-soft ring-1 ring-slate-200">
                   {setup.secret}
                 </code>
               </div>
-              <Field label="Code from the app">
+              <Field label={t("cp.totp.code")}>
                 <Input
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
@@ -203,8 +205,8 @@ export function TwoFactorPanel() {
               </Field>
               {error && <p className="text-sm text-rose-600">{error}</p>}
               <div className="flex gap-2">
-                <Button loading={busy} onClick={enable} disabled={code.trim().length < 6}>Turn on</Button>
-                <Button variant="ghost" onClick={reset}>Cancel</Button>
+                <Button loading={busy} onClick={enable} disabled={code.trim().length < 6}>{t("cp.totp.turnOn")}</Button>
+                <Button variant="ghost" onClick={reset}>{t("common.cancel")}</Button>
               </div>
             </div>
           </div>
@@ -215,7 +217,7 @@ export function TwoFactorPanel() {
       {!setup && (
         <div className="rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
           {status === null ? (
-            <p className="text-sm text-ink-faint">Loading...</p>
+            <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>
           ) : enabled ? (
             <>
               <div className="flex items-center gap-3">
@@ -223,36 +225,36 @@ export function TwoFactorPanel() {
                   <ShieldCheck size={18} />
                 </span>
                 <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium text-ink-soft">On</div>
+                  <div className="text-sm font-medium text-ink-soft">{t("cp.totp.on")}</div>
                   <div className="text-xs text-ink-faint">
-                    {status.recoveryCodesRemaining} recovery code{status.recoveryCodesRemaining === 1 ? "" : "s"} left
+                    {t("cp.totp.codesLeft", { count: status.recoveryCodesRemaining })}
                   </div>
                 </div>
               </div>
               {status.recoveryCodesRemaining <= 2 && (
                 <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 ring-1 ring-amber-200">
-                  You're nearly out of recovery codes. Generate a new set while you still have access to this account.
+                  {t("cp.totp.codesLow")}
                 </p>
               )}
               {disabling ? (
                 <div className="mt-3 max-w-xs space-y-2">
-                  <Field label="Confirm your password">
+                  <Field label={t("cp.totp.confirmPassword")}>
                     <Input type="password" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" autoFocus />
                   </Field>
                   {error && <p className="text-sm text-rose-600">{error}</p>}
                   <div className="flex flex-wrap gap-2">
-                    <Button variant="danger" loading={busy} disabled={!password} onClick={disable}>Turn off</Button>
-                    <Button variant="secondary" loading={busy} disabled={!password} onClick={regenerate}>New recovery codes</Button>
-                    <Button variant="ghost" onClick={reset}>Cancel</Button>
+                    <Button variant="danger" loading={busy} disabled={!password} onClick={disable}>{t("cp.totp.turnOff")}</Button>
+                    <Button variant="secondary" loading={busy} disabled={!password} onClick={regenerate}>{t("cp.totp.newCodes")}</Button>
+                    <Button variant="ghost" onClick={reset}>{t("common.cancel")}</Button>
                   </div>
                 </div>
               ) : (
                 <div className="mt-3 flex gap-2">
                   <Button variant="secondary" className="h-8 px-3 py-0 text-xs" onClick={() => setDisabling(true)}>
-                    <RefreshCw size={14} /> New recovery codes
+                    <RefreshCw size={14} /> {t("cp.totp.newCodes")}
                   </Button>
                   <Button variant="ghost" className="h-8 px-3 py-0 text-xs" onClick={() => setDisabling(true)}>
-                    <ShieldOff size={14} /> Turn off
+                    <ShieldOff size={14} /> {t("cp.totp.turnOff")}
                   </Button>
                 </div>
               )}
@@ -263,7 +265,7 @@ export function TwoFactorPanel() {
                 <ShieldOff size={18} />
               </span>
               <div className="text-sm text-ink-faint">
-                Off. With it on, signing in with a password also needs a code from your phone.
+                {t("cp.totp.offHint")}
               </div>
             </div>
           )}
@@ -280,6 +282,7 @@ export function TwoFactorPanel() {
  * away until the user says they have.
  */
 function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
 
   async function copy() {
@@ -294,18 +297,18 @@ function RecoveryCodes({ codes, onDone }: { codes: string[]; onDone: () => void 
 
   return (
     <div className="mb-4 rounded-xl bg-amber-50 p-4 ring-1 ring-amber-200">
-      <h4 className="mb-1 text-sm font-semibold text-amber-900">Save your recovery codes</h4>
+      <h4 className="mb-1 text-sm font-semibold text-amber-900">{t("cp.totp.saveCodes")}</h4>
       <p className="mb-3 text-xs text-amber-800">
-        Each one signs you in once if you lose your phone. They won't be shown again - only their hashes are stored.
+        {t("cp.totp.saveCodesHint")}
       </p>
       <div className="grid grid-cols-2 gap-1.5 rounded-lg bg-white p-3 font-mono text-xs text-ink-soft ring-1 ring-amber-200">
         {codes.map((c) => <span key={c}>{c}</span>)}
       </div>
       <div className="mt-3 flex gap-2">
         <Button variant="secondary" className="h-8 px-3 py-0 text-xs" onClick={copy}>
-          {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? "Copied" : "Copy"}
+          {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? t("cp.totp.copied") : t("cp.totp.copy")}
         </Button>
-        <Button className="h-8 px-3 py-0 text-xs" onClick={onDone}>I've saved them</Button>
+        <Button className="h-8 px-3 py-0 text-xs" onClick={onDone}>{t("cp.totp.savedThem")}</Button>
       </div>
     </div>
   );

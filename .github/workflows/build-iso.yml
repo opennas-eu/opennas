@@ -1,0 +1,79 @@
+name: Build ISO
+
+on:
+  workflow_dispatch:
+    inputs:
+      arches:
+        description: "Space-separated arches (x86_64 aarch64)"
+        default: "x86_64"
+  push:
+    tags: ["v*"]
+
+# Builds and uploads workflow artifacts only; no releases are created, so the
+# token needs nothing beyond reading the repository.
+permissions:
+  contents: read
+
+jobs:
+  # Turns the arch list into a JSON array for the build matrix. A tag push
+  # builds every supported arch (as it always has); a manual run builds what
+  # was asked for in the `arches` input.
+  arches:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set.outputs.matrix }}
+    steps:
+      - id: set
+        env:
+          INPUT_ARCHES: ${{ github.event_name == 'workflow_dispatch' && inputs.arches || 'x86_64 aarch64' }}
+        run: |
+          json='['
+          for a in $INPUT_ARCHES; do
+            case "$a" in
+              x86_64|aarch64) ;;
+              *) echo "::error::unsupported arch: $a (expected x86_64 or aarch64)"; exit 1 ;;
+            esac
+            json="$json\"$a\","
+          done
+          json="${json%,}]"
+          [ "$json" != "[]" ] || { echo "::error::no arches given"; exit 1; }
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+
+  iso:
+    needs: arches
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ${{ fromJSON(needs.arches.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      # Needed so the aarch64 Alpine container can run under emulation.
+      - name: Register qemu binfmt
+        if: matrix.arch == 'aarch64'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+        with:
+          platforms: arm64
+
+      - name: Build ISO (${{ matrix.arch }})
+        run: OPENNAS_ARCHES="${{ matrix.arch }}" distro/build.sh
+
+      # distro/build.sh writes to BUILD/out/ at the repository root.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: opennas-${{ matrix.arch }}-iso
+          path: BUILD/out/*.iso
+          if-no-files-found: error

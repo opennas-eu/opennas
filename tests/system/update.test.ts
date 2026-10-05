@@ -65,7 +65,8 @@ test("the doas policy names every helper by absolute path", () => {
   // of all, since it is the one that installs code - has to be allow-listed by
   // its full path.
   const installer = readFileSync(join(repoRoot, "distro", "installer", "opennas-install"), "utf8");
-  const policy = installer.split("doas.d/opennas.conf")[1] ?? "";
+  // The policy ships as one file that the installer and the updater both install.
+  const policy = readFileSync(join(repoRoot, "packaging", "doas-opennas.conf"), "utf8");
   assert.ok(policy.includes("permit nopass opennas as root"), "no doas policy found in the installer");
 
   for (const helper of ["opennas-update", "opennas-storage", "opennas-sysctl", "opennas-logs", "opennas-firewall"]) {

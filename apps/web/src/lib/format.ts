@@ -1,5 +1,7 @@
 /** Small formatting helpers shared across the system apps. */
 
+import { tr, useI18n } from "../i18n/index.ts";
+
 export function formatBytes(bytes: number, decimals = 1): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
@@ -24,17 +26,17 @@ export function formatUptime(seconds: number): string {
 }
 
 export function formatRelative(iso: string | null): string {
-  if (!iso) return "never";
+  if (!iso) return tr("ui.time.never");
   const then = new Date(iso).getTime();
   const diff = Date.now() - then;
   const mins = Math.floor(diff / 60000);
-  if (mins < 1) return "just now";
-  if (mins < 60) return `${mins}m ago`;
+  if (mins < 1) return tr("ui.time.justNow");
+  if (mins < 60) return tr("ui.time.minutesAgo", { n: mins });
   const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return tr("ui.time.hoursAgo", { n: hours });
   const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
+  if (days < 30) return tr("ui.time.daysAgo", { n: days });
+  return new Date(iso).toLocaleDateString(useI18n.getState().locale);
 }
 
 export function initialsOf(name: string): string {

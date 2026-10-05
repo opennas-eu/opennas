@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { getUserById } from "../db/users.js";
+import { pendingActions } from "../auth/pending.js";
 import { getSettingOr } from "../db/settings.js";
 import { getClient, verifyClientSecret } from "../db/oidc-clients.js";
 import { jwks, signJwt } from "./keys.js";
@@ -145,6 +146,12 @@ export async function oidcProvider(app: FastifyInstance): Promise<void> {
     if (!req.auth) {
       return reply.redirect(`/?oidc_return=${encodeURIComponent(req.url)}`);
     }
+    // Signing in to another service is "using OpenNAS" as much as anything under
+    // /api, so an account with a temporary password or a missing required
+    // passkey finishes that first - the desktop shows them how.
+    if (pendingActions(req.auth.user).length > 0) {
+      return errorPage(reply, "Finish setting up your account", "Sign in to OpenNAS and complete your account setup, then try again.");
+    }
 
     const granted = scope.split(/\s+/).filter((s) => SUPPORTED_SCOPES.includes(s));
     return reply.type("text/html").send(
@@ -171,6 +178,9 @@ export async function oidcProvider(app: FastifyInstance): Promise<void> {
     const vr = validateClientRedirect(b.client_id, b.redirect_uri);
     if (!vr.ok) return errorPage(reply, "Can't sign you in", vr.error);
     if (!req.auth) return errorPage(reply, "Session expired", "Please sign in to OpenNAS again.");
+    if (pendingActions(req.auth.user).length > 0) {
+      return errorPage(reply, "Finish setting up your account", "Sign in to OpenNAS and complete your account setup, then try again.");
+    }
 
     const u = new URL(vr.redirectUri);
     if (b.state) u.searchParams.set("state", b.state);

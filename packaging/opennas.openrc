@@ -25,7 +25,12 @@ depend() {
 }
 
 start_pre() {
-	# Make sure the data dir exists and is owned by the service user.
-	checkpath -d -m 0750 -o "${OPENNAS_USER}:${OPENNAS_GROUP}" "${OPENNAS_DATA_DIR}"
+	# The data dir is root's and sticky, writable by the service group: the
+	# backend creates and replaces its own files in it, but cannot rename the
+	# root-owned share roots inside (see opennas-sysctl share-roots).
+	checkpath -d -m 1770 -o "root:${OPENNAS_GROUP}" "${OPENNAS_DATA_DIR}"
+	if [ -x "${OPENNAS_DIR}/opennas-sysctl" ]; then
+		"${OPENNAS_DIR}/opennas-sysctl" share-roots >/dev/null 2>&1 || ewarn "could not secure the share roots"
+	fi
 	checkpath -f -m 0640 -o "${OPENNAS_USER}:${OPENNAS_GROUP}" "${output_log}"
 }

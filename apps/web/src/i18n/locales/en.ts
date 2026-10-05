@@ -1,3 +1,7 @@
+import { enApps } from "./en/apps.ts";
+import { enControlPanel } from "./en/control-panel.ts";
+import { enDesktop } from "./en/desktop.ts";
+
 /**
  * English message catalogue - the source of truth.
  *
@@ -179,4 +183,9 @@ export const en = {
   // ---- Storage ------------------------------------------------------------
   "storage.used": "{used} of {total}",
   "storage.diskCount": "{count} disk|{count} disks",
+
+  // ---- Per-area catalogues -------------------------------------------------
+  ...enControlPanel,
+  ...enApps,
+  ...enDesktop,
 } as const;

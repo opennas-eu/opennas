@@ -10,19 +10,21 @@ import { confirmDialog } from "../../store/dialogs.ts";
 import { ManifestIcon } from "../ui/Icon.tsx";
 import { Button, Input } from "../ui/controls.tsx";
 import { StorageTargetField } from "../ui/StorageTargetField.tsx";
-import { AppCenter } from "./AppCenter.tsx";
+import { AppCenter, categoryLabel } from "./AppCenter.tsx";
+import { useT } from "../../i18n/index.ts";
 
 const CATEGORIES: (AppCategory | "all")[] = ["all", "utilities", "media", "productivity", "developer"];
 
 type Tab = "packages" | "apps";
 
 export function PackageCenter() {
+  const t = useT();
   const [tab, setTab] = useState<Tab>("packages");
   return (
     <div className="flex h-full flex-col bg-white">
       <div className="flex items-center gap-1 border-b border-slate-200 px-3 pt-2.5">
-        <TabButton active={tab === "packages"} onClick={() => setTab("packages")} icon={<Package size={15} />}>Packages</TabButton>
-        <TabButton active={tab === "apps"} onClick={() => setTab("apps")} icon={<Blocks size={15} />}>App Center</TabButton>
+        <TabButton active={tab === "packages"} onClick={() => setTab("packages")} icon={<Package size={15} />}>{t("app.pkg.packages")}</TabButton>
+        <TabButton active={tab === "apps"} onClick={() => setTab("apps")} icon={<Blocks size={15} />}>{t("app.center.title")}</TabButton>
       </div>
       <div className="min-h-0 flex-1">
         {tab === "packages" ? <PackagesTab /> : <AppCenter embedded />}
@@ -46,6 +48,7 @@ function TabButton({ active, onClick, icon, children }: { active: boolean; onCli
 }
 
 function PackagesTab() {
+  const t = useT();
   const [packages, setPackages] = useState<PackageInfo[] | null>(null);
   const [query, setQuery] = useState("");
   const [cat, setCat] = useState<AppCategory | "all">("all");
@@ -83,17 +86,17 @@ function PackagesTab() {
       await reloadApps(); // newly-installed app appears on the desktop
       push({
         level: "success",
-        title: `${p.name} installed`,
+        title: t("app.pkg.installedTitle", { name: p.name }),
         body:
           p.type === "app"
-            ? "Find it on your desktop and in the app launcher."
+            ? t("app.pkg.installedApp")
             : res.status === "running"
-              ? "Container is running."
-              : "Tracked as an external service (Docker isn't running).",
+              ? t("app.pkg.installedRunning")
+              : t("app.pkg.installedExternal"),
         appId: p.type === "app" ? p.id : undefined,
       });
     } catch (err) {
-      push({ level: "warning", title: "Install failed", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.pkg.installFailed"), body: err instanceof ApiRequestError ? err.message : t("app.center.failed") });
     } finally {
       setWorking(null);
     }
@@ -105,21 +108,21 @@ function PackagesTab() {
       await api.post(`/packages/${p.id}/${action}`);
       await load();
     } catch (err) {
-      push({ level: "warning", title: `Couldn't ${action}`, body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: action === "start" ? t("app.pkg.startFailed") : t("app.pkg.stopFailed"), body: err instanceof ApiRequestError ? err.message : t("app.center.failed") });
     } finally {
       setWorking(null);
     }
   }
 
   async function uninstall(p: PackageInfo) {
-    if (!(await confirmDialog({ title: `Uninstall ${p.name}?`, confirmLabel: "Uninstall", danger: true }))) return;
+    if (!(await confirmDialog({ title: t("app.pkg.uninstallTitle", { name: p.name }), confirmLabel: t("app.center.uninstall"), danger: true }))) return;
     setWorking(p.id);
     try {
       await api.post(`/packages/${p.id}/uninstall`);
       await load();
       await reloadApps();
     } catch (err) {
-      push({ level: "warning", title: "Uninstall failed", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.pkg.uninstallFailed"), body: err instanceof ApiRequestError ? err.message : t("app.center.failed") });
     } finally {
       setWorking(null);
     }
@@ -140,7 +143,7 @@ function PackagesTab() {
       <header className="space-y-3 border-b border-slate-200 px-5 py-4">
         <div className="relative">
           <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search packages" className="pl-9" />
+          <Input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t("app.pkg.search")} className="pl-9" />
         </div>
         <div className="flex flex-wrap gap-1.5">
           {CATEGORIES.map((c) => (
@@ -152,14 +155,14 @@ function PackagesTab() {
                 cat === c ? "bg-brand-600 text-white" : "bg-slate-100 text-ink-faint hover:bg-slate-200",
               )}
             >
-              {c}
+              {categoryLabel(t, c)}
             </button>
           ))}
         </div>
       </header>
 
       <div className="opennas-scroll grid min-h-0 flex-1 auto-rows-min gap-3 overflow-auto p-5 sm:grid-cols-2">
-        {packages === null && <p className="col-span-full py-10 text-center text-sm text-ink-faint">Loading catalog...</p>}
+        {packages === null && <p className="col-span-full py-10 text-center text-sm text-ink-faint">{t("app.pkg.loading")}</p>}
         {filtered.map((p) => (
           <div key={p.id} className="flex gap-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
             <div className={clsx("grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-gradient-to-br text-white", p.iconGradient)}>
@@ -184,28 +187,28 @@ function PackagesTab() {
                   <>
                     <span className={clsx("inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium",
                       p.status === "running" ? "bg-emerald-50 text-emerald-700" : p.status === "stopped" ? "bg-slate-200 text-ink-soft" : "bg-emerald-50 text-emerald-700")}>
-                      <Check size={13} /> {p.status === "running" ? "Running" : p.status === "stopped" ? "Stopped" : p.status === "external" ? "Installed (external)" : "Installed"}
+                      <Check size={13} /> {p.status === "running" ? t("app.pkg.running") : p.status === "stopped" ? t("app.pkg.stopped") : p.status === "external" ? t("app.pkg.installedExternalBadge") : t("app.center.installed")}
                     </span>
                     {p.status === "running" && p.webPort && (
                       <a href={`http://${location.hostname}:${p.webPort}`} target="_blank" rel="noopener" className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-brand-600 transition hover:bg-brand-50">
-                        <ExternalLink size={13} /> Open
+                        <ExternalLink size={13} /> {t("app.pkg.open")}
                       </a>
                     )}
                     {isAdmin && p.type === "service" && p.status === "running" && (
-                      <Button variant="ghost" className="h-7 px-2 text-xs" loading={working === p.id} onClick={() => void serviceAction(p, "stop")}><Square size={13} /> Stop</Button>
+                      <Button variant="ghost" className="h-7 px-2 text-xs" loading={working === p.id} onClick={() => void serviceAction(p, "stop")}><Square size={13} /> {t("app.pkg.stop")}</Button>
                     )}
                     {isAdmin && p.type === "service" && p.status === "stopped" && (
-                      <Button variant="ghost" className="h-7 px-2 text-xs text-emerald-700" loading={working === p.id} onClick={() => void serviceAction(p, "start")}><Play size={13} /> Start</Button>
+                      <Button variant="ghost" className="h-7 px-2 text-xs text-emerald-700" loading={working === p.id} onClick={() => void serviceAction(p, "start")}><Play size={13} /> {t("app.pkg.start")}</Button>
                     )}
                     {isAdmin && (
                       <Button variant="ghost" className="h-7 px-2 text-xs text-rose-600 hover:bg-rose-50" loading={working === p.id} onClick={() => void uninstall(p)}>
-                        <Trash2 size={13} /> Uninstall
+                        <Trash2 size={13} /> {t("app.center.uninstall")}
                       </Button>
                     )}
                   </>
                 ) : (
-                  <Button className="h-8 px-3 py-0 text-xs" disabled={!isAdmin} loading={working === p.id} onClick={() => void install(p)} title={isAdmin ? undefined : "Admins only"}>
-                    <Download size={14} /> {p.type === "service" && !dockerRunning && p.requiresDocker ? "Install (Docker off)" : "Install"}
+                  <Button className="h-8 px-3 py-0 text-xs" disabled={!isAdmin} loading={working === p.id} onClick={() => void install(p)} title={isAdmin ? undefined : t("app.pkg.adminsOnly")}>
+                    <Download size={14} /> {p.type === "service" && !dockerRunning && p.requiresDocker ? t("app.pkg.installDockerOff") : t("app.center.install")}
                   </Button>
                 )}
               </div>
@@ -213,12 +216,12 @@ function PackagesTab() {
           </div>
         ))}
         {packages !== null && filtered.length === 0 && (
-          <p className="col-span-full py-10 text-center text-sm text-ink-faint">No packages match your search.</p>
+          <p className="col-span-full py-10 text-center text-sm text-ink-faint">{t("app.pkg.noMatch")}</p>
         )}
       </div>
 
       {!isAdmin && (
-        <footer className="border-t border-slate-200 px-5 py-2 text-xs text-ink-faint">Installing packages requires administrator access.</footer>
+        <footer className="border-t border-slate-200 px-5 py-2 text-xs text-ink-faint">{t("app.pkg.adminRequired")}</footer>
       )}
       {choosing && (
         <StorageChooser
@@ -250,6 +253,7 @@ function StorageChooser({
   onCancel: () => void;
   onConfirm: (volume: string) => void;
 }) {
+  const t = useT();
   const [volume, setVolume] = useState("");
   return (
     <div
@@ -257,15 +261,14 @@ function StorageChooser({
       onMouseDown={(e) => { if (e.target === e.currentTarget) onCancel(); }}
     >
       <div className="w-full max-w-sm rounded-2xl bg-white p-5 shadow-2xl ring-1 ring-slate-900/10">
-        <h2 className="mb-1 text-base font-semibold text-ink">Install {pkg.name}</h2>
+        <h2 className="mb-1 text-base font-semibold text-ink">{t("app.pkg.installName", { name: pkg.name })}</h2>
         <p className="mb-4 text-sm text-ink-faint">
-          This service keeps data on disk. Choose where it should live - it can't be moved afterwards without
-          reinstalling.
+          {t("app.pkg.storageHint")}
         </p>
-        <StorageTargetField value={volume} onChange={setVolume} label="Store data on" />
+        <StorageTargetField value={volume} onChange={setVolume} label={t("app.pkg.storeDataOn")} />
         <div className="mt-4 flex justify-end gap-2">
-          <Button variant="ghost" onClick={onCancel}>Cancel</Button>
-          <Button onClick={() => onConfirm(volume)}>Install</Button>
+          <Button variant="ghost" onClick={onCancel}>{t("common.cancel")}</Button>
+          <Button onClick={() => onConfirm(volume)}>{t("app.center.install")}</Button>
         </div>
       </div>
     </div>

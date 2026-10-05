@@ -2,64 +2,537 @@
 # Privileged system-config helper for OpenNAS, invoked via doas by the
 # unprivileged backend. Scoped to a fixed set of subcommands. Installed to
 # /usr/lib/opennas/.
+#
+#   opennas-sysctl hostname <name>
+#   opennas-sysctl iface <dev> dhcp
+#   opennas-sysctl iface <dev> static <ip> <prefix> [gateway] [dns]
+#   opennas-sysctl timezone <Area/City>
+#   opennas-sysctl ntp <server>
+#   opennas-sysctl update
+#   opennas-sysctl ssh {enable|disable|keys <user>}
+#   opennas-sysctl user-add <name>             create a share (SMB) account
+#   opennas-sysctl user-passwd <name>          set its Samba password (stdin)
+#   opennas-sysctl user-del <name>             remove it again
+#   opennas-sysctl group-sync <group> [user...] mirror an OpenNAS group
+#   opennas-sysctl group-del <group>
+#   opennas-sysctl service <unit> <action>     samba/nfs/netatalk, nginx reload, docker start
+#   opennas-sysctl share-apply                 install staged smb.conf + exports, reload
+#   opennas-sysctl share-dir create <name> [volume]  create a share's directory
+#   opennas-sysctl share-roots                 make the share roots root's (idempotent)
+#
+# ## Why the account and service commands live here
+#
+# They used to be raw `adduser`, `smbpasswd`, `rc-service` ... rules in the doas
+# policy, with any arguments. That made the backend - which is reachable from
+# the network - able to set a Samba password for root, strip the real `wheel`
+# group, or stop sshd. Every one of them is now a subcommand that decides for
+# itself which accounts, groups and services it may touch, rather than trusting
+# the caller to have asked for something sensible.
 set -eu
+# Character ranges in the checks below are byte ranges, whatever the locale.
+export LC_ALL=C
 
-valid_host() { case "$1" in ""|*[!a-zA-Z0-9.-]*) return 1;; *) return 0;; esac; }
-valid_word() { case "$1" in ""|*[!a-zA-Z0-9._/:+-]*) return 1;; *) return 0;; esac; }
-valid_ip()   { case "$1" in ""|*[!0-9.]*) return 1;; *) return 0;; esac; }
+# Where the backend leaves the share configs it generates (its data dir), and
+# the only trees a share may point into.
+DATA_DIR=/var/lib/opennas
+GENERATED=/var/lib/opennas/generated
+SHARE_ROOT=/var/lib/opennas/shared
+VOLUME_ROOT=/var/lib/opennas/volumes
+# The service account: owns each share directory (so file operations inside
+# it work), and nothing above one.
+SVC=opennas
+# Owners a directory above a share may have. Only root on a real machine; the
+# test sandbox, which cannot chown, adds its own uid by rewriting a copy.
+TRUSTED_UIDS=0
+SMB_CONF=/etc/samba/smb.conf
+EXPORTS=/etc/exports
+
+# The GECOS text a share account is created with. It is what marks an account
+# as one OpenNAS made, and so one OpenNAS may change or delete.
+SHARE_GECOS="OpenNAS share user"
+
+die() { echo "$*" >&2; exit 1; }
+
+valid_host() { case "$1" in ""|-*|*[!a-zA-Z0-9.-]*) return 1;; *) return 0;; esac; }
+
+valid_ipv4() {
+	case "$1" in ""|*[!0-9.]*|.*|*.|*..*) return 1;; esac
+	_oifs=$IFS; IFS=.
+	# shellcheck disable=SC2086
+	set -- $1
+	IFS=$_oifs
+	[ "$#" -eq 4 ] || return 1
+	for _o in "$@"; do
+		[ "${#_o}" -le 3 ] && [ "$_o" -le 255 ] || return 1
+	done
+	return 0
+}
+
+valid_ipv6() {
+	case "$1" in ""|*[!0-9A-Fa-f:.]*) return 1;; *:*) ;; *) return 1;; esac
+	[ "${#1}" -le 45 ]
+}
+
+valid_ip() { valid_ipv4 "$1" || valid_ipv6 "$1"; }
+
+# A zone name like Europe/Berlin. The file is copied as root, so `..` or a
+# leading `/` would turn "set the timezone" into "copy /etc/shadow somewhere".
+valid_tz() {
+	case "$1" in ""|/*|-*|*[!a-zA-Z0-9._/+-]*) return 1;; esac
+	case "/$1/" in */../*|*/./*|*//*) return 1;; esac
+	return 0
+}
+
+# ---- Accounts --------------------------------------------------------------
+#
+# Names that are never OpenNAS's to create, change or delete, whatever their
+# uid. The groups matter as much as the users: mirroring an OpenNAS group called
+# `wheel` into the system used to *reconcile* its members, which removed the
+# real administrators from it.
+RESERVED="root bin daemon adm lp sync shutdown halt mail news uucp operator man
+postmaster cron crontab ftp sshd at squid xfs games cyrus vpopmail ntp smmsp
+guest nobody nogroup nfsnobody wheel sudo staff sys tty disk mem kmem
+floppy audio cdrom cdrw dialout tape video netdev kvm input render sgx shadow
+utmp users lock readproc abuild ping docker libvirt qemu opennas nginx samba
+avahi messagebus dbus chrony polkitd www-data plugdev usb console wsdd smartd
+utmpx systemd-journal netatalk rpc rpcuser statd postfix dovecot redis
+dhcpcd tss uuidd sasl tcpdump"
+
+valid_acct() {
+	case "$1" in ""|-*|.*|*[!a-zA-Z0-9_.-]*) return 1;; esac
+	[ "${#1}" -le 32 ]
+}
+
+reserved() {
+	_n=$(printf '%s' "$1" | tr 'A-Z' 'a-z')
+	for _r in $RESERVED; do [ "$_n" = "$_r" ] && return 0; done
+	return 1
+}
+
+field() { printf '%s\n' "$1" | cut -d: -f"$2"; }
+
+# Is <name> a share account - one this helper made, or an older OpenNAS made
+# before it existed? Anything else is somebody's real account and is left alone.
+share_user() {
+	valid_acct "$1" || return 1
+	reserved "$1" && return 1
+	_e=$(getent passwd "$1") || return 1
+	_uid=$(field "$_e" 3); _gid=$(field "$_e" 4); _gecos=$(field "$_e" 5); _shell=$(field "$_e" 7)
+	case "$_uid" in ""|*[!0-9]*) return 1;; esac
+	[ "$_uid" -ge 100 ] && [ "$_uid" -lt 65534 ] || return 1
+	# A share account never logs in. The console admin has a shell, so it can
+	# never match no matter what it is called.
+	case "$_shell" in /sbin/nologin|/usr/sbin/nologin|/bin/false) ;; *) return 1;; esac
+	# Never one that sits in a privileged group.
+	for _g in $(id -Gn "$1" 2>/dev/null); do reserved "$_g" && [ "$_g" != nogroup ] && return 1; done
+	[ "$_gecos" = "$SHARE_GECOS" ] && return 0
+	# Accounts created before this helper: busybox `adduser -S` with no -G and
+	# no -g gives exactly this - a system uid, primary group nogroup and the
+	# default GECOS. Packages that create daemon users pass their own group.
+	_ng=$(getent group nogroup 2>/dev/null | cut -d: -f3)
+	[ "$_uid" -lt 1000 ] && [ -n "$_ng" ] && [ "$_gid" = "$_ng" ] && [ "$_gecos" = "Linux User,,," ] && return 0
+	return 1
+}
+
+# Is <group> one OpenNAS may manage? Never a reserved name, never a low system
+# gid, never somebody's primary group, and only ever holding share accounts.
+share_group() {
+	valid_acct "$1" || return 1
+	reserved "$1" && return 1
+	_e=$(getent group "$1") || return 1
+	_gid=$(field "$_e" 3); _members=$(field "$_e" 4)
+	case "$_gid" in ""|*[!0-9]*) return 1;; esac
+	[ "$_gid" -ge 100 ] && [ "$_gid" -lt 65533 ] || return 1
+	if getent passwd | awk -F: -v gid="$_gid" '$4 == gid { found = 1 } END { exit !found }'; then
+		return 1
+	fi
+	_oifs=$IFS; IFS=,
+	for _m in $_members; do
+		IFS=$_oifs
+		[ -z "$_m" ] && continue
+		share_user "$_m" || { IFS=$_oifs; return 1; }
+	done
+	IFS=$_oifs
+	return 0
+}
+
+need_name() {
+	valid_acct "$1" || die "invalid name"
+	reserved "$1" && die "refusing to manage the reserved account or group '$1'"
+	return 0
+}
+
+# ---- Share configs ---------------------------------------------------------
+#
+# The backend generates smb.conf and /etc/exports into its data dir; those two
+# files are root-owned and only ever replaced from here, after checking. Before
+# this, the service user owned them outright, and one line - `/ *(rw,no_root_squash)`
+# - was all it took to hand the whole disk to anyone on the network.
+
+# ## Why the directories above a share are root's
+#
+# Checking a share path once is not enough if the service account can change
+# what the path means afterwards: with the share roots its own, it could swap a
+# share directory - or the share root itself - for a symlink to / the moment
+# share-apply had approved it, and widen the export to the whole disk. So
+# everything above a share directory belongs to root and is not writable by
+# the service account (the data dir is root's and sticky, so the service
+# account can still create its own files there but cannot rename the share
+# roots). Share directories are created through `share-dir`; the paths actually
+# installed are the resolved ones, and every directory above them is checked to
+# be one the service account cannot rewrite.
+
+trusted_uid() {
+	for _t in $TRUSTED_UIDS; do [ "$1" = "$_t" ] && return 0; done
+	return 1
+}
+
+# secure_parents <path> - every existing directory above <path>, up to /, is
+# owned by a trusted uid and writable by nobody else - or, if it is writable by
+# others, it is sticky and the entry below it on the way to <path> is trusted
+# too (so nobody else can rename it, or create it if it is missing). The
+# share directory itself is not
+# checked: it is the service account's on purpose.
+secure_parents() {
+	_c="$1"
+	while :; do
+		_d=$(dirname "$_c")
+		if [ -e "$_d" ]; then
+			[ -L "$_d" ] && return 1
+			_st=$(stat -c '%u %a' "$_d" 2>/dev/null) || return 1
+			_uid=${_st%% *}; _mode=$((0${_st#* }))
+			trusted_uid "$_uid" || return 1
+			if [ $((_mode & 18)) -ne 0 ]; then
+				[ $((_mode & 512)) -ne 0 ] || return 1
+				# A missing entry in a directory others can write is one they
+				# could create.
+				_cu=$(stat -c '%u' "$_c" 2>/dev/null) || return 1
+				trusted_uid "$_cu" || return 1
+			fi
+		fi
+		[ "$_d" = / ] && return 0
+		_c="$_d"
+	done
+}
+
+# share_target <path> - the path to install for a share: inside the share root
+# (one level down) or inside a volume (two levels down), no `..`, not a symlink,
+# resolved, and with nothing above it the service account could rewrite.
+# Prints the resolved path. A missing directory is fine (the daemons skip it)
+# and prints itself: with its parents locked, only root could create it.
+share_depth_ok() {
+	case "$1" in
+		"$SHARE_ROOT"/?*) _rest="${1#"$SHARE_ROOT"/}"; _want=1 ;;
+		"$VOLUME_ROOT"/?*) _rest="${1#"$VOLUME_ROOT"/}"; _want=2 ;;
+		*) return 1 ;;
+	esac
+	case "/$_rest/" in */../*|*/./*|*//*) return 1;; esac
+	[ "$(printf '%s\n' "$_rest" | awk -F/ '{ print NF }')" -eq "$_want" ]
+}
+
+share_target() {
+	_p="$1"
+	case "$_p" in *"%"*|*\\*|*'"'*|*"	"*) return 1;; esac
+	share_depth_ok "$_p" || return 1
+	[ -L "$_p" ] && return 1
+	if [ -e "$_p" ]; then
+		[ -d "$_p" ] || return 1
+		_real=$(readlink -f "$_p" 2>/dev/null) || return 1
+		share_depth_ok "$_real" || return 1
+	else
+		_real="$_p"
+	fi
+	secure_parents "$_real" || return 1
+	printf '%s\n' "$_real"
+}
+
+# own_root_dir <dir> <group> <mode> - make an existing real directory root's,
+# then set its mode. The mode is set only once the directory is verifiably ours:
+# until the chown, the service account could have swapped it for a symlink, and
+# chmod follows symlinks.
+own_root_dir() {
+	_d="$1"
+	[ -L "$_d" ] && { echo "refusing: $_d is a symlink" >&2; return 1; }
+	[ -d "$_d" ] || return 1
+	chown -h "0:$2" "$_d" 2>/dev/null || true
+	{ [ ! -L "$_d" ] && [ -O "$_d" ]; } || return 1
+	chmod "$3" "$_d"
+}
+
+# fix_share_roots - lay the directories above the shares out as described
+# above. Idempotent; installs and updates made before this existed left all of
+# them to the service account.
+fix_share_roots() {
+	_rc=0
+	own_root_dir "$DATA_DIR" "$SVC" 1770 || { echo "could not secure $DATA_DIR" >&2; return 1; }
+	for _r in "$SHARE_ROOT" "$VOLUME_ROOT"; do
+		[ -e "$_r" ] || [ -L "$_r" ] || mkdir -m 0755 "$_r"
+		own_root_dir "$_r" 0 0755 || { echo "could not secure $_r" >&2; _rc=1; }
+	done
+	[ "$_rc" = 0 ] || return 1
+	for _v in "$VOLUME_ROOT"/*; do
+		[ -L "$_v" ] && continue
+		[ -d "$_v" ] || continue
+		fix_volume_root "$_v" || _rc=1
+	done
+	return "$_rc"
+}
+
+# fix_volume_root <dir> - a volume's mount directory is root's; shares inside
+# it are the service account's, and so is the `opennas` directory VM disks and
+# container data go in.
+fix_volume_root() {
+	own_root_dir "$1" 0 0755 || { echo "could not secure $1" >&2; return 1; }
+	if [ ! -e "$1/opennas" ] && [ ! -L "$1/opennas" ]; then
+		mkdir -m 0755 "$1/opennas" && chown -h "$SVC:$SVC" "$1/opennas" 2>/dev/null || true
+	fi
+	return 0
+}
+
+# A share directory name: one path component, as File Station allows it.
+valid_share_name() {
+	case "$1" in ""|.|..|*/*) return 1;; esac
+	# No control characters: a newline would end the smb.conf line early.
+	[ "$(printf '%s' "$1" | tr -d '\001-\037\177')" = "$1" ] || return 1
+	[ "${#1}" -le 255 ]
+}
+
+# Copy a staged file into a private temporary next to its destination. Refuses
+# a symlink: it is root reading a path the service user controls.
+stage_copy() {
+	_src="$1"; _dst="$2"
+	[ -L "$_src" ] && die "refusing a symlinked $_src"
+	[ -f "$_src" ] || return 1
+	_tmp=$(mktemp "$(dirname "$_dst")/.opennas.XXXXXX")
+	# Bounded, so a runaway file cannot fill /etc.
+	head -c 1048576 < "$_src" > "$_tmp"
+	printf '%s\n' "$_tmp"
+}
+
+# smb.conf: every line must be one OpenNAS generates. Anything else - include,
+# root preexec, any *exec, magic script, a path outside the share trees, a force
+# user other than the service account - refuses the whole file, because dropping
+# a single line inside a section (say, `valid users`) could widen access.
+check_smb() {
+	awk -v owner="opennas" '
+	function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+	function bad(m) { printf "smb.conf line %d: %s\n", NR, m > "/dev/stderr"; err = 1 }
+	function isbool(v) { return v == "yes" || v == "no" }
+	BEGIN {
+		split("workgroup|server string|security|map to guest|ea support|vfs objects", g, "|")
+		for (i in g) global[g[i]] = 1
+		split("path|comment|browseable|read only|guest ok|valid users|write list|force user|force group|vfs objects|create mask|directory mask", s, "|")
+		for (i in s) share[s[i]] = 1
+		split("aapl|metadata|model|posix_rename|veto_appledouble|wipe_intentionally_left_blank_rfork|delete_empty_adfiles|time machine|time machine max size", f, "|")
+		for (i in f) fruit["fruit:" f[i]] = 1
+		split("repository|keeptree|versions|exclude|exclude_dir|touch|directory_mode", r, "|")
+		for (i in r) recycle["recycle:" r[i]] = 1
+		section = ""
+	}
+	{
+		line = $0
+		if (line ~ /[\001-\010\013-\037\177]/) { bad("control character"); next }
+		line = trim(line)
+		if (line == "" || line ~ /^[#;]/) next
+		if (line ~ /^\[/) {
+			if (line !~ /^\[[^]]+\]$/) { bad("malformed section"); next }
+			name = tolower(substr(line, 2, length(line) - 2))
+			if (name == "global") {
+				if (seen_global++) bad("second [global]")
+				if (section != "") bad("[global] after a share")
+			} else if (name == "homes" || name == "printers" || name == "print$" || name == "ipc$") {
+				bad("reserved section name")
+			} else if (!seen_global) {
+				bad("share before [global]")
+			}
+			section = name
+			next
+		}
+		eq = index(line, "=")
+		if (eq == 0) { bad("not a setting"); next }
+		key = tolower(trim(substr(line, 1, eq - 1)))
+		gsub(/[ \t]+/, " ", key)
+		val = trim(substr(line, eq + 1))
+		if (section == "") { bad("setting outside a section"); next }
+		if (key == "vfs objects") {
+			n = split(val, mods, /[ \t]+/)
+			for (i = 1; i <= n; i++)
+				if (mods[i] !~ /^(catia|fruit|streams_xattr|recycle)$/) bad("vfs module not allowed")
+			next
+		}
+		if (key in fruit) {
+			if (key == "fruit:time machine max size") { if (val !~ /^[0-9]+K$/) bad("bad size"); next }
+			if (key == "fruit:metadata") { if (val != "stream") bad("bad value"); next }
+			if (key == "fruit:model") { if (val !~ /^[A-Za-z0-9]+$/) bad("bad value"); next }
+			if (!isbool(val)) bad("bad value")
+			next
+		}
+		if (section == "global") {
+			if (!(key in global)) { bad("setting not allowed in [global]: " key); next }
+			if (key == "security" && val != "user") bad("bad value")
+			if (key == "map to guest" && val != "Never" && val != "Bad User") bad("bad value")
+			if (key == "ea support" && !isbool(val)) bad("bad value")
+			next
+		}
+		if (key in recycle) {
+			if (key == "recycle:repository" && val != ".recycle/%U") bad("bad value")
+			if (key == "recycle:directory_mode" && val !~ /^0[0-7][0-7][0-7]$/) bad("bad value")
+			next
+		}
+		if (!(key in share)) { bad("setting not allowed in a share: " key); next }
+		if (key == "path") { if (val == "") bad("empty path"); else print val; next }
+		if (key == "force user" || key == "force group") { if (val != owner) bad("force user/group must be the service account"); next }
+		if (key == "create mask" || key == "directory mask") { if (val !~ /^0[0-7][0-7][0-7]$/) bad("bad mask"); next }
+		if (key == "browseable" || key == "read only" || key == "guest ok") { if (!isbool(val)) bad("bad value"); next }
+		if (key == "valid users" || key == "write list") {
+			n = split(val, who, /[ \t]+/)
+			for (i = 1; i <= n; i++) if (who[i] != "" && who[i] !~ /^@?[A-Za-z0-9_][A-Za-z0-9_.-]*$/) bad("bad user list")
+			next
+		}
+	}
+	END { exit err }
+	' "$1"
+}
+
+# exports: `<path>  <client>(<opts>) ...` with only the options OpenNAS writes.
+# A line that fails is dropped rather than failing the file - removing an
+# export only ever narrows access, and one odd share must not stop every other
+# NFS change from taking effect.
+filter_exports() {
+	_in="$1"; _out="$2"
+	: > "$_out"
+	_ln=0
+	while IFS= read -r _line || [ -n "$_line" ]; do
+		_ln=$((_ln + 1))
+		case "$_line" in ""|"#"*) printf '%s\n' "$_line" >> "$_out"; continue;; esac
+		_ok=1
+		case "$_line" in *[!"	"\ -~]*) _ok=0;; /*) ;; *) _ok=0;; esac
+		if [ "$_ok" = 1 ]; then
+			# shellcheck disable=SC2086
+			set -f; set -- $_line; set +f
+			# Installed with the share's resolved path, not the one it was
+			# configured with (see share_target).
+			_rest="${_line#"$1"}"
+			_target=$(share_target "$1") || _ok=0
+			shift
+			[ "$#" -ge 1 ] || _ok=0
+			for _spec in "$@"; do
+				case "$_spec" in *"("*")") ;; *) _ok=0; break;; esac
+				_client="${_spec%%"("*}"
+				_opts="${_spec#*"("}"
+				_opts="${_opts%)}"
+				case "$_client" in ""|*[!A-Za-z0-9.:/*?_-]*) _ok=0; break;; esac
+				_oifs=$IFS; IFS=,
+				for _o in $_opts; do
+					case "$_o" in ro|rw|sync|no_subtree_check|root_squash|no_root_squash) ;; *) _ok=0;; esac
+				done
+				IFS=$_oifs
+			done
+		fi
+		if [ "$_ok" = 1 ]; then
+			printf '%s%s\n' "$_target" "$_rest" >> "$_out"
+		else
+			echo "exports line $_ln was not generated by OpenNAS; dropped" >&2
+		fi
+	done < "$_in"
+}
+
+# rewrite_smb_paths <map> <smb.conf> - the checked smb.conf with every share
+# path replaced by its resolved one from <map>. Lines are otherwise untouched.
+rewrite_smb_paths() {
+	awk -F'\t' '
+	function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+	FNR == NR { real[$1] = $2; next }
+	{
+		line = $0
+		eq = index(line, "=")
+		if (eq > 0 && tolower(trim(substr(line, 1, eq - 1))) == "path") {
+			val = trim(substr(line, eq + 1))
+			if ((val in real) && real[val] != val) line = substr(line, 1, eq) " " real[val]
+		}
+		print line
+	}
+	' "$1" "$2"
+}
+
+install_file() {
+	chmod 0644 "$1"
+	chown 0:0 "$1" 2>/dev/null || true
+	mv -f "$1" "$2"
+}
 
 case "${1:-}" in
 hostname)
-	name="${2:?}"; valid_host "$name" || { echo "invalid hostname" >&2; exit 1; }
+	name="${2:?}"; valid_host "$name" || die "invalid hostname"
 	echo "$name" > /etc/hostname
 	hostname "$name"
 	;;
 
 iface)
 	dev="${2:?}"; mode="${3:?}"
-	case "$dev" in ""|*[!a-zA-Z0-9]*) echo "invalid interface" >&2; exit 1;; esac
+	case "$dev" in ""|*[!a-zA-Z0-9]*) die "invalid interface";; esac
+	case "$mode" in dhcp|static) ;; *) die "invalid mode";; esac
+	if [ "$mode" = "static" ]; then
+		ip="${4:?}"; cidr="${5:?}"; gw="${6:-}"; dns="${7:-}"
+		valid_ip "$ip" || die "invalid IP"
+		# No gateway is a legitimate answer: a storage network with no route out.
+		[ -z "$gw" ] || valid_ip "$gw" || die "invalid gateway"
+		case "$cidr" in ""|*[!0-9]*) die "invalid prefix";; esac
+		if valid_ipv4 "$ip"; then max=32; else max=128; fi
+		[ "$cidr" -le "$max" ] || die "invalid prefix"
+		# One or more resolvers, separated by commas or spaces. Each becomes a
+		# line in resolv.conf, so each has to be an address and nothing more.
+		dns_list=""
+		for d in $(printf '%s' "$dns" | tr ',' ' '); do
+			valid_ip "$d" || die "invalid DNS server"
+			dns_list="$dns_list $d"
+		done
+	fi
 	{
 		echo "auto lo"
 		echo "iface lo inet loopback"
 		echo ""
 		echo "auto $dev"
 		if [ "$mode" = "static" ]; then
-			ip="${4:?}"; cidr="${5:?}"; gw="${6:-}"; dns="${7:-}"
-			valid_ip "$ip" && valid_ip "$gw" || { echo "invalid IP" >&2; exit 1; }
-			case "$cidr" in ""|*[!0-9]*) echo "invalid prefix" >&2; exit 1;; esac
 			echo "iface $dev inet static"
 			echo "    address $ip/$cidr"
-			[ -n "$gw" ] && echo "    gateway $gw"
-			[ -n "$dns" ] && echo "nameserver $dns" > /etc/resolv.conf
+			if [ -n "$gw" ]; then echo "    gateway $gw"; fi
 		else
 			echo "iface $dev inet dhcp"
 		fi
 	} > /etc/network/interfaces
+	if [ "$mode" = "static" ] && [ -n "$dns_list" ]; then
+		for d in $dns_list; do echo "nameserver $d"; done > /etc/resolv.conf
+	fi
 	rc-service networking restart >/dev/null 2>&1 || true
 	;;
 
 timezone)
-	tz="${2:?}"; valid_word "$tz" || { echo "invalid timezone" >&2; exit 1; }
-	[ -f "/usr/share/zoneinfo/$tz" ] || { echo "unknown timezone" >&2; exit 1; }
+	tz="${2:?}"; valid_tz "$tz" || die "invalid timezone"
+	zone="/usr/share/zoneinfo/$tz"
+	[ -f "$zone" ] || die "unknown timezone"
+	# Belt and braces: whatever the name, the file actually copied has to live
+	# in the zoneinfo tree.
+	real=$(readlink -f "$zone" 2>/dev/null || true)
+	case "$real" in /usr/share/zoneinfo/?*) ;; *) die "unknown timezone";; esac
 	# Deliberately NOT setup-timezone. Alpine's helper unconditionally tries to
 	# `apk add tzdata` first, and on an appliance with no route to a mirror that
 	# fails - *after* it has already removed /etc/localtime, leaving the box with
 	# no timezone at all. Copying the zone file is offline, deterministic, and
 	# cannot half-succeed.
-	cp "/usr/share/zoneinfo/$tz" /etc/localtime
+	cp "$real" /etc/localtime
 	echo "$tz" > /etc/timezone
 	;;
 
 ntp)
-	server="${2:?}"; valid_host "$server" || { echo "invalid NTP server" >&2; exit 1; }
+	server="${2:?}"; valid_host "$server" || die "invalid NTP server"
 	conf=/etc/chrony/chrony.conf
 	[ -f "$conf" ] || conf=/etc/chrony.conf
 	# If chrony isn't installed there is no config to edit, and quietly doing
 	# nothing here reported success to the UI while the clock kept drifting.
 	# Say so instead: a NAS with the wrong time breaks TLS, SMB and every log.
 	if [ ! -f "$conf" ]; then
-		echo "chrony is not installed - cannot configure time synchronisation" >&2
-		exit 1
+		die "chrony is not installed - cannot configure time synchronisation"
 	fi
 	sed -i '/^server /d; /^pool /d' "$conf"
 	echo "server $server iburst" >> "$conf"
@@ -84,21 +557,209 @@ ssh)
 		;;
 	keys)
 		user="${3:?}"
-		case "$user" in ""|root|*[!a-z0-9_-]*) echo "invalid user" >&2; exit 1;; esac
-		home=$(getent passwd "$user" | cut -d: -f6)
-		[ -n "$home" ] && [ -d "$home" ] || { echo "no such user" >&2; exit 1; }
-		install -d -m 0700 -o "$user" -g "$user" "$home/.ssh"
-		# Authorized keys arrive on stdin (one per line).
-		cat > "$home/.ssh/authorized_keys"
-		chown "$user:$user" "$home/.ssh/authorized_keys"
-		chmod 0600 "$home/.ssh/authorized_keys"
+		case "$user" in ""|-*|*[!a-z0-9_-]*) die "invalid user";; esac
+		reserved "$user" && die "refusing to manage keys for '$user'"
+		entry=$(getent passwd "$user") || die "no such user"
+		uid=$(field "$entry" 3); home=$(field "$entry" 6)
+		case "$uid" in ""|*[!0-9]*) die "no such user";; esac
+		# Only a real login account - never a system or service account, which
+		# is what the backend itself runs as.
+		[ "$uid" -ge 1000 ] && [ "$uid" -lt 65534 ] || die "refusing to manage keys for a system account"
+		case "$home" in /?*) ;; *) die "that user has no usable home directory";; esac
+		[ -d "$home" ] && [ ! -L "$home" ] || die "that user has no usable home directory"
+		# Refuse rather than follow: written as root, a symlinked .ssh or
+		# authorized_keys would be a write to wherever it points.
+		[ -L "$home/.ssh" ] && die "refusing: $home/.ssh is a symlink"
+		[ -L "$home/.ssh/authorized_keys" ] && die "refusing: authorized_keys is a symlink"
+		[ ! -e "$home/.ssh" ] || [ -d "$home/.ssh" ] || die "refusing: $home/.ssh is not a directory"
+		[ ! -d "$home/.ssh/authorized_keys" ] || die "refusing: authorized_keys is a directory"
+		# The checks above cannot close the race with a user who swaps a
+		# symlink in between, so the write itself happens *as that user*: then
+		# there is nothing a symlink could make it reach that the user could not
+		# already. Keys arrive on stdin (one per line) and are written to a
+		# temporary and renamed, which never follows the final component.
+		# shellcheck disable=SC2016
+		su -s /bin/sh -c '
+			set -eu
+			umask 077
+			cd "$HOME"
+			[ -L .ssh ] && exit 3
+			[ -d .ssh ] || mkdir -m 0700 .ssh
+			cd -P .ssh
+			tmp=$(mktemp ./.authorized_keys.XXXXXX)
+			cat > "$tmp"
+			chmod 0600 "$tmp"
+			mv -f "$tmp" authorized_keys
+		' "$user" || die "could not write authorized_keys"
 		;;
-	*) echo "usage: opennas-sysctl ssh {enable|disable|keys <user>}" >&2; exit 1 ;;
+	*) die "usage: opennas-sysctl ssh {enable|disable|keys <user>}" ;;
 	esac
 	;;
 
+user-add)
+	name="${2:?}"; need_name "$name"
+	if getent passwd "$name" >/dev/null 2>&1; then
+		share_user "$name" || die "'$name' is an existing account that OpenNAS does not manage"
+		exit 0
+	fi
+	# Locked, no home, no shell: an account that exists only so Samba has
+	# somebody to authenticate. Samba maps every session to the service account
+	# (force user), so it never owns files either.
+	adduser -S -D -H -s /sbin/nologin -g "$SHARE_GECOS" "$name"
+	;;
+
+user-passwd)
+	name="${2:?}"; need_name "$name"
+	share_user "$name" || die "'$name' is not an OpenNAS share account"
+	# smbpasswd reads "new\nconfirm\n" from our stdin.
+	smbpasswd -s -a "$name" >/dev/null
+	smbpasswd -e "$name" >/dev/null
+	;;
+
+user-del)
+	name="${2:?}"; need_name "$name"
+	getent passwd "$name" >/dev/null 2>&1 || exit 0
+	share_user "$name" || die "'$name' is not an OpenNAS share account"
+	smbpasswd -x "$name" >/dev/null 2>&1 || true
+	deluser "$name"
+	;;
+
+group-sync)
+	# group-sync <group> [user ...] - create the group if needed and make its
+	# members exactly the share accounts given. Members it does not manage are
+	# never removed (and a group holding any is refused outright).
+	group="${2:?}"; shift 2
+	need_name "$group"
+	if ! getent group "$group" >/dev/null 2>&1; then
+		# A regular (gid >= 1000) group, so it can never be mistaken for a
+		# system one later.
+		addgroup "$group"
+	fi
+	share_group "$group" || die "'$group' is an existing group that OpenNAS does not manage"
+	wanted=""
+	for u in "$@"; do
+		if share_user "$u"; then wanted="$wanted $u"; else echo "skipping '$u': not an OpenNAS share account" >&2; fi
+	done
+	current=$(getent group "$group" | cut -d: -f4 | tr ',' ' ')
+	for u in $wanted; do
+		case " $current " in *" $u "*) ;; *) addgroup "$u" "$group";; esac
+	done
+	for u in $current; do
+		case " $wanted " in *" $u "*) ;; *) share_user "$u" && delgroup "$u" "$group";; esac
+	done
+	;;
+
+group-del)
+	group="${2:?}"; need_name "$group"
+	getent group "$group" >/dev/null 2>&1 || exit 0
+	share_group "$group" || die "'$group' is not a group OpenNAS manages"
+	delgroup "$group"
+	;;
+
+service)
+	# service <unit> <action> - only the daemons OpenNAS owns, and only the
+	# actions it needs. `enable`/`disable` are the boot runlevel.
+	unit="${2:?}"; action="${3:?}"
+	case "$unit:$action" in
+		samba:start|samba:stop|samba:restart|samba:reload|samba:enable|samba:disable) ;;
+		nfs:start|nfs:stop|nfs:restart|nfs:reload|nfs:enable|nfs:disable) ;;
+		netatalk:start|netatalk:stop|netatalk:restart|netatalk:reload|netatalk:enable|netatalk:disable) ;;
+		nginx:reload|docker:start) ;;
+		*) die "refusing: $unit $action is not something OpenNAS manages" ;;
+	esac
+	case "$action" in
+		enable) rc-update add "$unit" default ;;
+		disable) rc-update del "$unit" default ;;
+		*) rc-service "$unit" "$action" ;;
+	esac
+	;;
+
+share-apply)
+	# Install the staged smb.conf and exports (each only if it checks out),
+	# then have the daemons re-read them.
+	rc=0
+	for f in smb.conf exports; do
+		if [ -L "$GENERATED/$f" ]; then
+			echo "refusing a symlinked $GENERATED/$f; nothing was installed" >&2
+			exit 1
+		fi
+	done
+	# Older installs left the share roots to the service account; the path
+	# checks below would (rightly) refuse every share until that is fixed.
+	fix_share_roots || true
+	if [ -d "$(dirname "$SMB_CONF")" ] && tmp=$(stage_copy "$GENERATED/smb.conf" "$SMB_CONF"); then
+		ok=1
+		paths=$(check_smb "$tmp") || ok=0
+		# Each share path, one per line (they may contain spaces), with the
+		# resolved path it is installed as: "<configured>TAB<resolved>".
+		map=$(mktemp "$(dirname "$SMB_CONF")/.opennas.XXXXXX")
+		if [ "$ok" = 1 ] && ! printf '%s\n' "$paths" | while IFS= read -r p; do
+			[ -z "$p" ] && continue
+			t=$(share_target "$p") || exit 1
+			printf '%s\t%s\n' "$p" "$t"
+		done > "$map"; then
+			echo "smb.conf: a share path is outside the share roots, or not one OpenNAS can safely share" >&2
+			ok=0
+		fi
+		if [ "$ok" = 1 ]; then
+			out=$(mktemp "$(dirname "$SMB_CONF")/.opennas.XXXXXX")
+			rewrite_smb_paths "$map" "$tmp" > "$out"
+			rm -f "$tmp" "$map"
+			install_file "$out" "$SMB_CONF"
+		else
+			rm -f "$tmp" "$map"
+			echo "smb.conf was not installed: it contains settings OpenNAS does not generate" >&2
+			rc=1
+		fi
+	fi
+	if tmp=$(stage_copy "$GENERATED/exports" "$EXPORTS"); then
+		out=$(mktemp "$(dirname "$EXPORTS")/.opennas.XXXXXX")
+		filter_exports "$tmp" "$out"
+		rm -f "$tmp"
+		install_file "$out" "$EXPORTS"
+	fi
+	# Best-effort: a daemon that is switched off has nothing to reload.
+	smbcontrol all reload-config >/dev/null 2>&1 || true
+	exportfs -ra >/dev/null 2>&1 || true
+	rc-service netatalk reload >/dev/null 2>&1 || true
+	exit "$rc"
+	;;
+
+share-dir)
+	# share-dir create <name> [volume] - a share's directory, inside the share
+	# root or inside a volume, owned by the service account. The directories
+	# above it are root's, so this is the only way one appears; an existing
+	# directory (a ZFS dataset, a share re-created) is left as it is.
+	op="${2:-}"; name="${3:-}"; vol="${4:-}"
+	[ "$op" = create ] || die "usage: opennas-sysctl share-dir create <name> [volume]"
+	valid_share_name "$name" || die "invalid share name"
+	if [ -z "$vol" ]; then
+		base="$SHARE_ROOT"
+	else
+		case "$vol" in *[!a-zA-Z0-9_-]*|-*) die "invalid volume";; esac
+		base="$VOLUME_ROOT/$vol"
+	fi
+	fix_share_roots >/dev/null 2>&1 || true
+	[ -d "$base" ] && [ ! -L "$base" ] || die "no such volume"
+	[ -z "$vol" ] || fix_volume_root "$base" || die "could not secure the volume"
+	# From here on nothing above the new directory can change under us.
+	secure_parents "$base/$name" || die "refusing: a directory above the share is writable by the service account"
+	cd -P "$base" || die "no such volume"
+	if [ -L "./$name" ]; then
+		die "refusing: $base/$name is a symlink"
+	elif [ -e "./$name" ]; then
+		[ -d "./$name" ] || die "refusing: $base/$name exists and is not a directory"
+	else
+		mkdir -m 0755 "./$name"
+		chown -h "$SVC:$SVC" "./$name" 2>/dev/null || true
+	fi
+	;;
+
+share-roots)
+	fix_share_roots
+	;;
+
 *)
-	echo "usage: opennas-sysctl {hostname|iface|timezone|ntp|update|ssh} ..." >&2
-	exit 1
+	die "usage: opennas-sysctl {hostname|iface|timezone|ntp|update|ssh|user-add|user-passwd|user-del|group-sync|group-del|service|share-apply|share-dir|share-roots} ..."
 	;;
 esac

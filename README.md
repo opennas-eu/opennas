@@ -119,26 +119,43 @@ OPENNAS_OIDC_CLIENT_SECRET=replace-with-your-client-secret
 OPENNAS_OIDC_REDIRECT_URI=https://your-nas/api/auth/oidc/callback
 ```
 
-The sign-in screen then offers SSO. `OPENNAS_OIDC_AUTOCREATE=true` allows the
-first sign-in to create a local account.
+The sign-in screen then offers SSO once the initial admin account exists.
+Account creation on first SSO sign-in is off by default; set
+`OPENNAS_OIDC_AUTOCREATE=true` to enable it. Accounts created this way are never
+administrators.
 
 ## Security
 
-The backend runs as an unprivileged service account. Privileged system operations
-use dedicated shell helpers, allowed by absolute path in the `doas` policy.
-The helpers validate their own arguments.
+The backend runs as an unprivileged service account. Privileged operations go
+only through dedicated shell helpers, allowed by absolute path in the `doas`
+policy; the only other permitted commands are `reboot` and `poweroff`, with no
+arguments. The helpers validate their own arguments and refuse to touch system
+accounts. Samba and NFS configurations are root-owned and installed by a helper
+after validation. Share folders are created by a helper, and everything above
+them (the data directory, the share roots and each volume's mount directory) is
+owned by root, so the backend cannot redirect an approved share elsewhere.
+
+The service account is a member of the `docker` and `libvirt` groups so that it
+can manage containers and virtual machines. Control of either is equivalent to
+root on the host, so a compromise of the backend should be treated as a
+compromise of the machine.
 
 - Passwords use scrypt; session tokens are stored as SHA-256 hashes.
 - Recoverable secrets use AES-256-GCM with a local key file restricted to mode
   0600. This does not protect against an attacker who can read both the data and
   its key, or who controls the running service.
-- The data directory uses mode 0700; the database and its WAL and shared-memory
-  files use mode 0600.
+- On the appliance the data directory is owned by root with mode 1770 (group
+  `opennas`, sticky); the database and its WAL and shared-memory files use
+  mode 0600.
 - Forwarded client addresses are trusted only from loopback.
-- Third-party apps run in opaque-origin iframes and use the SDK bridge to access
-  approved capabilities.
-- The privileged update helper verifies Ed25519 signatures before installing a
-  bundle, independently of the backend that downloads it.
+- Third-party apps run in opaque-origin iframes, also enforced by a `sandbox`
+  CSP on app content, and use the SDK bridge to access approved capabilities.
+  An update signed by a different publisher key, or unsigned where the
+  installed version was signed, needs approval before it installs.
+- The privileged update helper copies the bundle to a root-only directory,
+  verifies its Ed25519 signature and refuses versions that are not newer than the
+  installed one, independently of the backend that downloads it. A failed update
+  is rolled back, including service files.
 
 Configuration exports omit secrets. They are not backups of shared files, VM
 disks or container volumes.

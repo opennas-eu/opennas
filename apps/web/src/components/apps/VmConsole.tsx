@@ -5,8 +5,15 @@ import { Keyboard, MonitorPlay, RefreshCw, X } from "lucide-react";
 import type { VmInfo } from "@opennas/shared";
 import { apiWsUrl } from "../../lib/api.ts";
 import { Button } from "../ui/controls.tsx";
+import { useT, type MessageKey } from "../../i18n/index.ts";
 
 type Status = "connecting" | "connected" | "disconnected";
+
+const STATUS_LABEL = {
+  connecting: "app.vmConsole.connecting",
+  connected: "app.vmConsole.connected",
+  disconnected: "app.vmConsole.statusDisconnected",
+} as const satisfies Record<Status, MessageKey>;
 
 /**
  * In-browser VNC console for a running VM, via noVNC. Connects to the admin-gated
@@ -18,7 +25,9 @@ export function VmConsole({ vm, onClose }: { vm: VmInfo; onClose: () => void }) 
   const screenRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<RFB | null>(null);
   const [status, setStatus] = useState<Status>("connecting");
-  const [error, setError] = useState<string | null>(null);
+  const t = useT();
+  // Held as a key, so a language change while the console is open re-renders it.
+  const [error, setError] = useState<MessageKey | null>(null);
   const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
@@ -32,7 +41,7 @@ export function VmConsole({ vm, onClose }: { vm: VmInfo; onClose: () => void }) 
       rfb = new RFB(el, apiWsUrl(`/vms/${encodeURIComponent(vm.name)}/console`), { shared: true });
     } catch {
       setStatus("disconnected");
-      setError("Couldn't start the console.");
+      setError("app.vmConsole.startFailed");
       return;
     }
     rfb.scaleViewport = true;
@@ -43,11 +52,11 @@ export function VmConsole({ vm, onClose }: { vm: VmInfo; onClose: () => void }) 
     const onDisconnect = (e: Event) => {
       setStatus("disconnected");
       const clean = (e as CustomEvent<{ clean: boolean }>).detail?.clean;
-      setError(clean ? null : "The console connection dropped. The VM may have stopped.");
+      setError(clean ? null : "app.vmConsole.dropped");
     };
     const onSecurityFailure = () => {
       setStatus("disconnected");
-      setError("The VNC server rejected the connection.");
+      setError("app.vmConsole.rejected");
     };
     rfb.addEventListener("connect", onConnect);
     rfb.addEventListener("disconnect", onDisconnect);
@@ -80,27 +89,27 @@ export function VmConsole({ vm, onClose }: { vm: VmInfo; onClose: () => void }) 
       <div className="mx-auto flex max-h-full w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-slate-900 shadow-2xl ring-1 ring-slate-900/40">
         <div className="flex items-center gap-2 border-b border-slate-700/60 px-4 py-2.5">
           <MonitorPlay size={18} className="text-slate-300" />
-          <h2 className="flex-1 truncate font-semibold text-slate-100">Console - {vm.name}</h2>
+          <h2 className="flex-1 truncate font-semibold text-slate-100">{t("app.vmConsole.title", { name: vm.name })}</h2>
           <span className="flex items-center gap-1.5 text-xs text-slate-400">
             <span className={clsx("h-2 w-2 rounded-full", statusDot)} />
-            {status}
+            {t(STATUS_LABEL[status])}
           </span>
           <button
             onClick={() => rfbRef.current?.sendCtrlAltDel()}
             disabled={status !== "connected"}
             className="ml-2 flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-xs font-medium text-slate-200 transition hover:bg-slate-700/60 disabled:opacity-40"
-            title="Send Ctrl+Alt+Delete"
+            title={t("app.vmConsole.sendCad")}
           >
             <Keyboard size={14} /> Ctrl+Alt+Del
           </button>
           <button
             onClick={() => setAttempt((a) => a + 1)}
             className="grid h-8 w-8 place-items-center rounded-lg text-slate-300 transition hover:bg-slate-700/60"
-            title="Reconnect"
+            title={t("app.vmConsole.reconnect")}
           >
             <RefreshCw size={15} />
           </button>
-          <button onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-slate-300 transition hover:bg-slate-700/60" title="Close">
+          <button onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-slate-300 transition hover:bg-slate-700/60" title={t("desktop.close")}>
             <X size={18} />
           </button>
         </div>
@@ -111,12 +120,12 @@ export function VmConsole({ vm, onClose }: { vm: VmInfo; onClose: () => void }) 
             <div className="pointer-events-none absolute inset-0 grid place-items-center">
               <div className="rounded-xl bg-slate-800/80 px-5 py-4 text-center">
                 <p className="text-sm font-medium text-slate-200">
-                  {status === "connecting" ? "Connecting to console..." : "Disconnected"}
+                  {status === "connecting" ? t("app.vmConsole.connectingLong") : t("app.vmConsole.disconnected")}
                 </p>
-                {error && <p className="mt-1 max-w-xs text-xs text-slate-400">{error}</p>}
+                {error && <p className="mt-1 max-w-xs text-xs text-slate-400">{t(error)}</p>}
                 {status === "disconnected" && (
                   <Button className="pointer-events-auto mt-3 h-8 text-xs" onClick={() => setAttempt((a) => a + 1)}>
-                    <RefreshCw size={14} /> Reconnect
+                    <RefreshCw size={14} /> {t("app.vmConsole.reconnect")}
                   </Button>
                 )}
               </div>

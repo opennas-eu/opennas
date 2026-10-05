@@ -43,6 +43,8 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
 
   const index = STEPS.indexOf(step);
+  // The shortcut is drawn as keycaps, so the sentence is split around it.
+  const searchTip = t("ui.ob.searchTip").split("{keys}");
 
   async function finish() {
     // Persist first, so a failure here doesn't mean seeing the wizard forever.
@@ -131,13 +133,12 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
               </span>
               <h2 className="mb-1 text-lg font-semibold text-ink">{t("ob.createShare")}</h2>
               <p className="mb-4 text-sm text-ink-faint">
-                Use shared folders for documents, media and backups. You can add more folders later and
-                set access permissions for each one.
+                {t("ui.ob.shareIntro")}
               </p>
               <Input
                 value={shareName}
                 onChange={(e) => setShareName(e.target.value)}
-                placeholder="e.g. documents"
+                placeholder={t("ui.ob.sharePlaceholder")}
                 autoFocus
                 onKeyDown={(e) => { if (e.key === "Enter") void createShare(); }}
               />
@@ -211,16 +212,17 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
               <p className="mx-auto mb-4 max-w-sm text-sm text-ink-faint">
                 {shareCreated ? t("ob.doneShare", { name: shareCreated }) : ""}
                 {servicesSaved && (smb || nfs) ? t("ob.doneSharing") : ""}
-                Press <kbd className="rounded border border-slate-200 px-1 text-[11px]">Ctrl</kbd>+
-                <kbd className="rounded border border-slate-200 px-1 text-[11px]">K</kbd> any time to search apps,
-                settings and files.
+                {searchTip[0]}
+                <kbd className="rounded border border-slate-200 px-1 text-[11px]">{t("ui.ob.ctrlKey")}</kbd>+
+                <kbd className="rounded border border-slate-200 px-1 text-[11px]">K</kbd>
+                {searchTip[1]}
               </p>
               <div className="flex flex-wrap justify-center gap-2">
                 <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => openControlPanel("users")}>
                   {t("ob.addUser")}
                 </Button>
                 <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => openControlPanel("storage")}>
-                  Check disks
+                  {t("ui.ob.checkDisks")}
                 </Button>
               </div>
             </div>
@@ -236,7 +238,7 @@ export function Onboarding({ onClose }: { onClose: () => void }) {
           <span className="flex-1" />
           {index > 0 && step !== "done" && (
             <Button variant="ghost" onClick={() => setStep(STEPS[index - 1]!)} disabled={busy}>
-              Back
+              {t("ui.ob.back")}
             </Button>
           )}
           {step === "welcome" && <Button onClick={() => setStep("share")}>{t("ob.getStarted")}</Button>}

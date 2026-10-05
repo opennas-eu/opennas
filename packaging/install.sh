@@ -41,7 +41,7 @@ if ! id "$SVC_USER" >/dev/null 2>&1; then
 fi
 
 echo "==> Laying out files"
-mkdir -p "$PREFIX" "$DATA/shared" "$DATA/avatars" "$DATA/generated"
+mkdir -p "$PREFIX" "$DATA/shared" "$DATA/volumes" "$DATA/avatars" "$DATA/generated"
 # Replace code dirs, keep node_modules across upgrades unless package.json changed.
 rm -rf "$PREFIX/server" "$PREFIX/web"
 cp -r "$SRC/." "$PREFIX/"
@@ -68,7 +68,20 @@ install -D -m 0644 "$HERE/nginx-opennas.conf" /etc/nginx/http.d/opennas.conf
 echo "==> Permissions"
 chown -R root:root "$PREFIX"
 chown -R "$SVC_USER:$SVC_GROUP" "$DATA"
-chmod 0750 "$DATA"
+# Everything above a share directory is root's, so the service account cannot
+# swap a share for a symlink after its config was checked: the data dir is
+# root's and sticky (the service still creates its own files in it), the share
+# roots are root's, and share directories are made by `opennas-sysctl share-dir`.
+mkdir -p "$DATA/volumes"
+chown root:"$SVC_GROUP" "$DATA"
+chmod 1770 "$DATA"
+for d in "$DATA/shared" "$DATA/volumes"; do
+	[ -L "$d" ] && { echo "error: $d is a symlink" >&2; exit 1; }
+	chown -h root:root "$d"
+	# Once root's, nothing in the sticky data dir can swap it; if it was swapped
+	# before the chown, it is a symlink now and chmod would follow it.
+	[ -L "$d" ] || chmod 0755 "$d"
+done
 
 echo "==> Enabling services"
 if command -v rc-update >/dev/null 2>&1; then
@@ -81,7 +94,7 @@ cat <<EOF
 OpenNAS installed.
 
   code:    $PREFIX
-  data:    $DATA   (owned by $SVC_USER)
+  data:    $DATA   (root-owned, sticky; writable by group $SVC_GROUP)
   config:  /etc/conf.d/opennas
   service: /etc/init.d/opennas   nginx: /etc/nginx/http.d/opennas.conf
 

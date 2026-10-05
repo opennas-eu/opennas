@@ -6,6 +6,9 @@ import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { confirmDialog } from "../../../store/dialogs.ts";
 import { Button, Field, Input, Select, Toggle } from "../../ui/controls.tsx";
+import { useLocale, useT, type MessageKey } from "../../../i18n/index.ts";
+
+type T = ReturnType<typeof useT>;
 
 /**
  * Maintenance the NAS runs on a timer.
@@ -16,46 +19,60 @@ import { Button, Field, Input, Select, Toggle } from "../../ui/controls.tsx";
  * what it actually does and what it can't.
  */
 
-const KINDS: { id: SystemTaskKind; label: string; blurb: string; needs: "volume" | "disk" | "none" }[] = [
+const KINDS: { id: SystemTaskKind; label: MessageKey; blurb: MessageKey; needs: "volume" | "disk" | "none" }[] = [
   {
     id: "config-backup",
-    label: "Back up settings",
-    blurb: "Saves users, shares and settings on this NAS. Keep a separate copy elsewhere in case the NAS fails.",
+    label: "cp.tasks.kind.configBackup",
+    blurb: "cp.tasks.kind.configBackupBlurb",
     needs: "none",
   },
   {
     id: "scrub",
-    label: "Scrub a volume",
-    blurb: "Reads everything back and checks it, so quiet corruption is caught early. btrfs, XFS and ZFS only.",
+    label: "cp.tasks.kind.scrub",
+    blurb: "cp.tasks.kind.scrubBlurb",
     needs: "volume",
   },
   {
     id: "trim",
-    label: "Trim a volume",
-    blurb: "Keeps an SSD fast as it fills up. Pointless on a hard disk, but harmless.",
+    label: "cp.tasks.kind.trim",
+    blurb: "cp.tasks.kind.trimBlurb",
     needs: "volume",
   },
   {
     id: "smart-test",
-    label: "SMART self-test",
-    blurb: "Starts the drive's self-test. View the result under Storage once the drive finishes.",
+    label: "cp.tasks.kind.smartTest",
+    blurb: "cp.tasks.kind.smartTestBlurb",
     needs: "disk",
   },
 ];
 
-const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+/** Weekday names in the active language, Sunday first (index = JS getDay()). */
+function weekdayNames(locale: string): string[] {
+  const fmt = new Intl.DateTimeFormat(locale, { weekday: "long" });
+  // 1 January 2023 was a Sunday.
+  return Array.from({ length: 7 }, (_, i) => fmt.format(new Date(2023, 0, 1 + i)));
+}
+
+/** "1st", "2nd"... - or "1." - picked by the language's ordinal rules. */
+function ordinal(t: T, locale: string, n: number): string {
+  const rule = new Intl.PluralRules(locale, { type: "ordinal" }).select(n);
+  const key: MessageKey =
+    rule === "one" ? "cp.tasks.ordinal.one" : rule === "two" ? "cp.tasks.ordinal.two" : rule === "few" ? "cp.tasks.ordinal.few" : "cp.tasks.ordinal.other";
+  return t(key, { n });
+}
 
 /** The schedule as a sentence, which is the whole reason for not using cron. */
-function describe(task: SystemTask): string {
+function describe(task: SystemTask, t: T, locale: string): string {
   const at = `${String(task.hour).padStart(2, "0")}:${String(task.minute).padStart(2, "0")}`;
-  if (task.frequency === "daily") return `Every day at ${at}`;
-  if (task.frequency === "weekly") return `Every ${DAYS[task.weekday] ?? "Sunday"} at ${at}`;
-  const n = task.dayOfMonth;
-  const suffix = n % 10 === 1 && n !== 11 ? "st" : n % 10 === 2 && n !== 12 ? "nd" : n % 10 === 3 && n !== 13 ? "rd" : "th";
-  return `The ${n}${suffix} of each month at ${at}`;
+  if (task.frequency === "daily") return t("cp.tasks.everyDayAt", { at });
+  const days = weekdayNames(locale);
+  if (task.frequency === "weekly") return t("cp.tasks.everyWeekdayAt", { day: days[task.weekday] ?? days[0]!, at });
+  return t("cp.tasks.monthlyAt", { nth: ordinal(t, locale, task.dayOfMonth), at });
 }
 
 export function ScheduledTasks() {
+  const t = useT();
+  const locale = useLocale();
   const [data, setData] = useState<SystemTasksResponse | null>(null);
   const [adding, setAdding] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -68,13 +85,13 @@ export function ScheduledTasks() {
 
   // A running task finishes without telling anyone, so poll while one is.
   useEffect(() => {
-    if (!data?.tasks.some((t) => t.lastStatus === "running")) return;
+    if (!data?.tasks.some((x) => x.lastStatus === "running")) return;
     const timer = setInterval(() => void load(), 5000);
     return () => clearInterval(timer);
   }, [data, load]);
 
   function fail(err: unknown, title: string) {
-    push({ level: "warning", title, body: err instanceof ApiRequestError ? err.message : "Failed." });
+    push({ level: "warning", title, body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
   }
 
   async function toggle(task: SystemTask, enabled: boolean) {
@@ -83,7 +100,7 @@ export function ScheduledTasks() {
       await api.patch(`/admin/tasks/${task.id}`, { enabled });
       await load();
     } catch (err) {
-      fail(err, "Couldn't change that task");
+      fail(err, t("cp.tasks.changeFailed"));
     } finally {
       setBusy(null);
     }
@@ -93,10 +110,10 @@ export function ScheduledTasks() {
     setBusy(task.id);
     try {
       await api.post(`/admin/tasks/${task.id}/run`, {});
-      push({ level: "info", title: "Started", body: `${task.name} is running now; its schedule is unchanged.` });
+      push({ level: "info", title: t("cp.tasks.started"), body: t("cp.tasks.startedBody", { name: task.name }) });
       await load();
     } catch (err) {
-      fail(err, "Couldn't start that task");
+      fail(err, t("cp.tasks.startFailed"));
     } finally {
       setBusy(null);
     }
@@ -104,9 +121,9 @@ export function ScheduledTasks() {
 
   async function remove(task: SystemTask) {
     const ok = await confirmDialog({
-      title: `Delete "${task.name}"?`,
-      message: "Removes the schedule. Existing backups and completed checks are kept.",
-      confirmLabel: "Delete",
+      title: t("cp.tasks.deleteTitle", { name: task.name }),
+      message: t("cp.tasks.deleteMessage"),
+      confirmLabel: t("common.delete"),
       danger: true,
     });
     if (!ok) return;
@@ -115,7 +132,7 @@ export function ScheduledTasks() {
       await api.del(`/admin/tasks/${task.id}`);
       await load();
     } catch (err) {
-      fail(err, "Couldn't delete that task");
+      fail(err, t("cp.tasks.deleteFailed"));
     } finally {
       setBusy(null);
     }
@@ -127,11 +144,11 @@ export function ScheduledTasks() {
     <section className="mb-6">
       <div className="mb-2 flex items-center justify-between">
         <h3 className="flex items-center gap-2 text-sm font-semibold text-ink-soft">
-          <CalendarClock size={15} /> Scheduled tasks
+          <CalendarClock size={15} /> {t("tasks.title")}
         </h3>
         {!adding && (
           <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => setAdding(true)}>
-            <Plus size={13} /> New task
+            <Plus size={13} /> {t("tasks.new")}
           </Button>
         )}
       </div>
@@ -142,48 +159,49 @@ export function ScheduledTasks() {
           disks={data.disks}
           onDone={() => { setAdding(false); void load(); }}
           onCancel={() => setAdding(false)}
-          onError={(m) => push({ level: "warning", title: "Couldn't create that task", body: m })}
+          onError={(m) => push({ level: "warning", title: t("cp.tasks.createFailed"), body: m })}
         />
       )}
 
       {data.tasks.length === 0 && !adding ? (
         <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-ink-faint ring-1 ring-slate-200/70">
-          Nothing scheduled. A nightly settings backup and a monthly scrub are the two most worth having.
+          {t("cp.tasks.empty")}
         </p>
       ) : (
         <div className="space-y-2">
-          {data.tasks.map((t) => {
-            const kind = KINDS.find((k) => k.id === t.kind);
+          {data.tasks.map((task) => {
+            const kind = KINDS.find((k) => k.id === task.kind);
             return (
-              <div key={t.id} className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200/70">
+              <div key={task.id} className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200/70">
                 <div className="flex items-start gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-1.5">
-                      <span className="truncate text-sm font-medium text-ink-soft">{t.name}</span>
+                      <span className="truncate text-sm font-medium text-ink-soft">{task.name}</span>
                       <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-ink-soft">
-                        {kind?.label ?? t.kind}
+                        {kind ? t(kind.label) : task.kind}
                       </span>
-                      {t.target && <span className="font-mono text-[11px] text-ink-faint">{t.target}</span>}
+                      {task.target && <span className="font-mono text-[11px] text-ink-faint">{task.target}</span>}
                     </div>
                     <div className="mt-0.5 text-[11px] text-ink-faint">
-                      {describe(t)}
-                      {t.enabled ? ` - next ${new Date(t.nextRunAt).toLocaleString()}` : " - paused"}
+                      {describe(task, t, locale)}
+                      {" - "}
+                      {task.enabled ? t("tasks.nextRun", { when: new Date(task.nextRunAt).toLocaleString() }) : t("tasks.paused")}
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-1">
-                    <Toggle checked={t.enabled} onChange={(v) => void toggle(t, v)} label={`Enable ${t.name}`} />
+                    <Toggle checked={task.enabled} onChange={(v) => void toggle(task, v)} label={t("cp.tasks.enableLabel", { name: task.name })} />
                     <button
-                      onClick={() => void runNow(t)}
-                      disabled={busy === t.id || t.lastStatus === "running"}
-                      title="Run now"
+                      onClick={() => void runNow(task)}
+                      disabled={busy === task.id || task.lastStatus === "running"}
+                      title={t("tasks.runNow")}
                       className="grid h-7 w-7 place-items-center rounded-md text-ink-soft transition hover:bg-slate-200 disabled:opacity-40"
                     >
                       <Play size={14} />
                     </button>
                     <button
-                      onClick={() => void remove(t)}
-                      disabled={busy === t.id}
-                      title="Delete task"
+                      onClick={() => void remove(task)}
+                      disabled={busy === task.id}
+                      title={t("cp.tasks.deleteTask")}
                       className="grid h-7 w-7 place-items-center rounded-md text-ink-soft transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-40"
                     >
                       <Trash2 size={14} />
@@ -191,34 +209,34 @@ export function ScheduledTasks() {
                   </div>
                 </div>
 
-                {t.lastStatus && (
+                {task.lastStatus && (
                   <div
                     className={clsx(
                       "mt-2 flex items-start gap-2 rounded-lg px-2.5 py-1.5 text-[11px] ring-1",
-                      t.lastStatus === "ok"
+                      task.lastStatus === "ok"
                         ? "bg-emerald-50 text-emerald-800 ring-emerald-200"
-                        : t.lastStatus === "running"
+                        : task.lastStatus === "running"
                           ? "bg-slate-100 text-ink-soft ring-slate-200"
                           : "bg-rose-50 text-rose-700 ring-rose-200",
                     )}
                   >
-                    {t.lastStatus === "ok" ? (
+                    {task.lastStatus === "ok" ? (
                       <CheckCircle2 size={12} className="mt-0.5 shrink-0" />
-                    ) : t.lastStatus === "running" ? (
+                    ) : task.lastStatus === "running" ? (
                       <Loader2 size={12} className="mt-0.5 shrink-0 animate-spin" />
                     ) : (
                       <AlertTriangle size={12} className="mt-0.5 shrink-0" />
                     )}
                     <span className="min-w-0 flex-1">
-                      {t.lastRunAt && (
-                        <span className="opacity-70">{new Date(t.lastRunAt).toLocaleString()} - </span>
+                      {task.lastRunAt && (
+                        <span className="opacity-70">{new Date(task.lastRunAt).toLocaleString()} - </span>
                       )}
-                      {t.lastStatus === "running" ? "Running now..." : <span className="whitespace-pre-wrap">{t.lastOutput}</span>}
+                      {task.lastStatus === "running" ? t("tasks.running") : <span className="whitespace-pre-wrap">{task.lastOutput}</span>}
                     </span>
                   </div>
                 )}
 
-                {kind && <p className="mt-1.5 text-[11px] text-ink-faint">{kind.blurb}</p>}
+                {kind && <p className="mt-1.5 text-[11px] text-ink-faint">{t(kind.blurb)}</p>}
               </div>
             );
           })}
@@ -235,8 +253,11 @@ function TaskForm({ volumes, disks, onDone, onCancel, onError }: {
   onCancel: () => void;
   onError: (m: string) => void;
 }) {
+  const t = useT();
+  const locale = useLocale();
+  const days = weekdayNames(locale);
   const [kind, setKind] = useState<SystemTaskKind>("config-backup");
-  const [name, setName] = useState("Nightly settings backup");
+  const [name, setName] = useState(() => t("cp.tasks.defaultName"));
   const [target, setTarget] = useState("");
   const [frequency, setFrequency] = useState<SystemTaskFrequency>("daily");
   const [time, setTime] = useState("03:00");
@@ -265,7 +286,7 @@ function TaskForm({ volumes, disks, onDone, onCancel, onError }: {
       });
       onDone();
     } catch (err) {
-      onError(err instanceof ApiRequestError ? err.message : "Failed.");
+      onError(err instanceof ApiRequestError ? err.message : t("cp.failed"));
     } finally {
       setBusy(false);
     }
@@ -274,7 +295,7 @@ function TaskForm({ volumes, disks, onDone, onCancel, onError }: {
   return (
     <div className="mb-2.5 rounded-xl bg-slate-50 p-3.5 ring-1 ring-slate-200/70">
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="What to do">
+        <Field label={t("cp.tasks.whatToDo")}>
           <Select
             value={kind}
             onChange={(e) => {
@@ -283,32 +304,33 @@ function TaskForm({ volumes, disks, onDone, onCancel, onError }: {
               setTarget("");
               // A default name that matches what was just chosen, rather than
               // leaving "Nightly settings backup" on a scrub.
-              setName(KINDS.find((k) => k.id === next)?.label ?? "");
+              const nextKind = KINDS.find((k) => k.id === next);
+              setName(nextKind ? t(nextKind.label) : "");
             }}
             className="w-full"
           >
-            {KINDS.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
+            {KINDS.map((k) => <option key={k.id} value={k.id}>{t(k.label)}</option>)}
           </Select>
         </Field>
-        <Field label="Name">
+        <Field label={t("common.name")}>
           <Input value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
       </div>
 
-      <p className="mt-2 text-[11px] text-ink-faint">{meta.blurb}</p>
+      <p className="mt-2 text-[11px] text-ink-faint">{t(meta.blurb)}</p>
 
       {needsTarget && (
         <div className="mt-3">
-          <Field label={meta.needs === "volume" ? "Volume" : "Disk"}>
+          <Field label={meta.needs === "volume" ? t("cp.tasks.volume") : t("cp.tasks.disk")}>
             {options.length === 0 ? (
               <p className="rounded-lg bg-white px-3 py-2 text-xs text-ink-faint ring-1 ring-slate-200/70">
                 {meta.needs === "volume"
-                  ? "Create a data volume under Storage first."
-                  : "No disks were detected."}
+                  ? t("cp.tasks.noVolumes")
+                  : t("cp.tasks.noDisks")}
               </p>
             ) : (
               <Select value={target} onChange={(e) => setTarget(e.target.value)} className="w-full">
-                <option value="">Choose one...</option>
+                <option value="">{t("cp.tasks.chooseOne")}</option>
                 {options.map((o) => <option key={o} value={o}>{o}</option>)}
               </Select>
             )}
@@ -317,22 +339,22 @@ function TaskForm({ volumes, disks, onDone, onCancel, onError }: {
       )}
 
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        <Field label="How often">
+        <Field label={t("cp.tasks.howOften")}>
           <Select value={frequency} onChange={(e) => setFrequency(e.target.value as SystemTaskFrequency)} className="w-full">
-            <option value="daily">Every day</option>
-            <option value="weekly">Every week</option>
-            <option value="monthly">Every month</option>
+            <option value="daily">{t("cp.tasks.everyDay")}</option>
+            <option value="weekly">{t("cp.tasks.everyWeek")}</option>
+            <option value="monthly">{t("cp.tasks.everyMonth")}</option>
           </Select>
         </Field>
         {frequency === "weekly" && (
-          <Field label="Day">
+          <Field label={t("cp.tasks.day")}>
             <Select value={weekday} onChange={(e) => setWeekday(Number(e.target.value))} className="w-full">
-              {DAYS.map((d, i) => <option key={d} value={i}>{d}</option>)}
+              {days.map((d, i) => <option key={i} value={i}>{d}</option>)}
             </Select>
           </Field>
         )}
         {frequency === "monthly" && (
-          <Field label="Day of month">
+          <Field label={t("cp.tasks.dayOfMonth")}>
             <Input
               type="number"
               min={1}
@@ -342,14 +364,14 @@ function TaskForm({ volumes, disks, onDone, onCancel, onError }: {
             />
           </Field>
         )}
-        <Field label="At">
+        <Field label={t("cp.tasks.at")}>
           <Input type="time" value={time} onChange={(e) => setTime(e.target.value)} />
         </Field>
       </div>
 
       {frequency === "monthly" && dayOfMonth > 28 && (
         <p className="mt-2 text-[11px] text-ink-faint">
-          Months shorter than that run it on their last day instead of skipping it.
+          {t("cp.tasks.shortMonths")}
         </p>
       )}
 
@@ -360,9 +382,9 @@ function TaskForm({ volumes, disks, onDone, onCancel, onError }: {
           disabled={!name.trim() || (needsTarget && !target)}
           onClick={() => void create()}
         >
-          Create task
+          {t("cp.tasks.createTask")}
         </Button>
-        <Button variant="ghost" className="h-8 px-3 text-xs" onClick={onCancel}>Cancel</Button>
+        <Button variant="ghost" className="h-8 px-3 text-xs" onClick={onCancel}>{t("common.cancel")}</Button>
       </div>
     </div>
   );

@@ -4,6 +4,7 @@ import type { AppPermission, DevApp, DevAppsResponse } from "@opennas/shared";
 import { APP_PERMISSIONS } from "@opennas/shared";
 import { api, ApiRequestError } from "../../lib/api.ts";
 import { Button, Field, Input, Toggle } from "../ui/controls.tsx";
+import { useT } from "../../i18n/index.ts";
 
 /**
  * Development apps - load an app from a local dev server instead of repacking
@@ -14,6 +15,7 @@ import { Button, Field, Input, Toggle } from "../ui/controls.tsx";
  * admin-only, restricted to localhost, and off unless somebody adds one.
  */
 export function DevApps({ onChanged }: { onChanged: () => Promise<void> }) {
+  const t = useT();
   const [apps, setApps] = useState<DevApp[] | null>(null);
   const [draft, setDraft] = useState<DevApp[]>([]);
   const [adding, setAdding] = useState(false);
@@ -43,7 +45,7 @@ export function DevApps({ onChanged }: { onChanged: () => Promise<void> }) {
       setForm({ id: "", name: "", url: "http://localhost:5174", permissions: [], enabled: true });
       await onChanged();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't save that.");
+      setError(err instanceof ApiRequestError ? err.message : t("app.dev.saveFailed"));
     } finally {
       setBusy(false);
     }
@@ -62,40 +64,38 @@ export function DevApps({ onChanged }: { onChanged: () => Promise<void> }) {
     <section className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
       <div className="mb-1 flex items-center justify-between">
         <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink-soft">
-          <Wrench size={15} /> Development apps
+          <Wrench size={15} /> {t("app.dev.title")}
         </h3>
         {!adding && (
           <Button variant="secondary" className="h-8 px-2.5 text-xs" onClick={() => setAdding(true)}>
-            <Plus size={13} /> Add
+            <Plus size={13} /> {t("common.add")}
           </Button>
         )}
       </div>
       <p className="mb-3 text-xs text-ink-faint">
-        Run an app straight from your dev server - edit, refresh, no repacking. It gets the same sandbox and the same
-        permission checks as an installed app; only the source of the files differs. Localhost only, and only
-        administrators can see or launch them.
+        {t("app.dev.intro")}
       </p>
 
       {adding && (
         <div className="mb-3 space-y-3 rounded-xl bg-white p-3.5 ring-1 ring-slate-200">
           <div className="grid gap-3 sm:grid-cols-3">
-            <Field label="App id" hint="Lowercase; must not clash with an installed app">
+            <Field label={t("app.dev.appId")} hint={t("app.dev.appIdHint")}>
               <Input
                 value={form.id}
                 onChange={(e) => setForm({ ...form, id: e.target.value.toLowerCase().replace(/[^a-z0-9._-]/g, "") })}
                 placeholder="my-app"
               />
             </Field>
-            <Field label="Name">
-              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="My App" />
+            <Field label={t("common.name")}>
+              <Input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder={t("app.dev.namePlaceholder")} />
             </Field>
-            <Field label="Dev server URL">
+            <Field label={t("app.dev.url")}>
               <Input value={form.url} onChange={(e) => setForm({ ...form, url: e.target.value })} placeholder="http://localhost:5174" />
             </Field>
           </div>
 
           <div>
-            <div className="mb-1.5 text-sm font-medium text-ink-soft">Permissions</div>
+            <div className="mb-1.5 text-sm font-medium text-ink-soft">{t("app.center.permissions")}</div>
             <div className="flex flex-wrap gap-1.5">
               {APP_PERMISSIONS.map((p) => (
                 <button
@@ -113,7 +113,7 @@ export function DevApps({ onChanged }: { onChanged: () => Promise<void> }) {
               ))}
             </div>
             <p className="mt-1.5 text-[11px] text-ink-faint">
-              Grant only what you're testing - a development app is enforced exactly like any other.
+              {t("app.dev.grantHint")}
             </p>
           </div>
 
@@ -125,17 +125,17 @@ export function DevApps({ onChanged }: { onChanged: () => Promise<void> }) {
               disabled={form.id.length < 2 || !form.name.trim() || !form.url.trim()}
               onClick={() => save([...draft, form])}
             >
-              <Check size={13} /> Add
+              <Check size={13} /> {t("common.add")}
             </Button>
             <Button variant="ghost" className="h-8 px-3 text-xs" onClick={() => { setAdding(false); setError(null); }}>
-              Cancel
+              {t("common.cancel")}
             </Button>
           </div>
         </div>
       )}
 
       {apps.length === 0 && !adding ? (
-        <p className="text-xs text-ink-faint">None registered.</p>
+        <p className="text-xs text-ink-faint">{t("app.dev.none")}</p>
       ) : (
         <div className="space-y-1.5">
           {draft.map((a, i) => (
@@ -156,10 +156,10 @@ export function DevApps({ onChanged }: { onChanged: () => Promise<void> }) {
               <Toggle
                 checked={a.enabled}
                 onChange={(v) => void save(draft.map((x, j) => (j === i ? { ...x, enabled: v } : x)))}
-                label={`Enable ${a.name}`}
+                label={t("app.center.enableItem", { name: a.name })}
               />
               <button
-                aria-label={`Remove ${a.name}`}
+                aria-label={t("app.repo.remove", { name: a.name })}
                 onClick={() => void save(draft.filter((_, j) => j !== i))}
                 className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ink-faint transition-colors hover:bg-rose-500 hover:text-white"
               >
@@ -174,7 +174,7 @@ export function DevApps({ onChanged }: { onChanged: () => Promise<void> }) {
         <div className="mt-2.5 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] text-amber-800 ring-1 ring-amber-200">
           <AlertTriangle size={12} className="mt-0.5 shrink-0" />
           <span>
-            Each enabled entry lets the desktop frame that one origin. Remove them when you're done developing.
+            {t("app.dev.warning")}
           </span>
         </div>
       )}

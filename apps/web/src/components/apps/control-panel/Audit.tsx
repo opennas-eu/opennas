@@ -6,6 +6,7 @@ import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { Button, Input, Select } from "../../ui/controls.tsx";
 import { formatRelative } from "../../../lib/format.ts";
+import { useT } from "../../../i18n/index.ts";
 
 const PAGE = 100;
 
@@ -16,6 +17,7 @@ const OUTCOME_STYLE: Record<AuditOutcome, string> = {
 };
 
 export function Audit() {
+  const t = useT();
   const push = useNotifications((s) => s.push);
   const [data, setData] = useState<AuditResponse | null>(null);
   const [lockouts, setLockouts] = useState<LockoutsResponse["lockouts"]>([]);
@@ -42,17 +44,17 @@ export function Audit() {
 
   // Debounced so typing in the search box doesn't fire a request per keystroke.
   useEffect(() => {
-    const t = setTimeout(() => void load(), 250);
-    return () => clearTimeout(t);
+    const timer = setTimeout(() => void load(), 250);
+    return () => clearTimeout(timer);
   }, [load]);
 
   async function unlock(username: string) {
     try {
       await api.del(`/admin/lockouts/${encodeURIComponent(username)}`);
-      push({ level: "success", title: `${username} unlocked` });
+      push({ level: "success", title: t("cp.audit.unlocked", { name: username }) });
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't unlock", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.audit.unlockFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
@@ -62,26 +64,26 @@ export function Audit() {
   return (
     <div className="flex h-full flex-col">
       <div className="mb-3">
-        <h2 className="flex items-center gap-2 text-lg font-semibold text-ink"><ShieldCheck size={20} /> Audit log</h2>
-        <p className="text-sm text-ink-faint">Every change made through OpenNAS - who did it, when, and from where.</p>
+        <h2 className="flex items-center gap-2 text-lg font-semibold text-ink"><ShieldCheck size={20} /> {t("cp.auditLog")}</h2>
+        <p className="text-sm text-ink-faint">{t("cp.audit.subtitle")}</p>
       </div>
 
       {/* Locked accounts sit above the log: they're the thing needing action. */}
       {lockouts.length > 0 && (
         <div className="mb-3 rounded-xl bg-amber-50 p-3 ring-1 ring-amber-200">
           <h3 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-amber-800">
-            <LockOpen size={15} /> Locked out after repeated failed sign-ins
+            <LockOpen size={15} /> {t("cp.audit.lockedOut")}
           </h3>
           <div className="space-y-1.5">
             {lockouts.map((l) => (
               <div key={l.username} className="flex items-center gap-2 text-xs text-amber-900">
                 <span className="font-medium">{l.username}</span>
                 <span className="text-amber-700">
-                  {l.failures} failures - unlocks {formatRelative(l.lockedUntil)}
+                  {t("cp.audit.failures", { count: l.failures, when: formatRelative(l.lockedUntil) })}
                 </span>
                 <span className="flex-1" />
                 <Button variant="secondary" className="h-7 px-2 text-xs" onClick={() => void unlock(l.username)}>
-                  <Unlock size={12} /> Unlock now
+                  <Unlock size={12} /> {t("cp.audit.unlockNow")}
                 </Button>
               </div>
             ))}
@@ -93,41 +95,41 @@ export function Audit() {
         <Input
           value={search}
           onChange={(e) => { setSearch(e.target.value); setPage(0); }}
-          placeholder="Search action, target or user"
+          placeholder={t("cp.audit.searchPlaceholder")}
           className="h-9 max-w-xs"
         />
         <Select value={action} onChange={(e) => { setAction(e.target.value); setPage(0); }} className="h-9">
-          <option value="">All actions</option>
+          <option value="">{t("cp.audit.allActions")}</option>
           {(data?.actions ?? []).map((a) => <option key={a} value={a}>{a}</option>)}
         </Select>
         <Select value={outcome} onChange={(e) => { setOutcome(e.target.value as AuditOutcome | ""); setPage(0); }} className="h-9">
-          <option value="">Any outcome</option>
-          <option value="ok">Succeeded</option>
-          <option value="denied">Denied</option>
-          <option value="error">Failed</option>
+          <option value="">{t("cp.audit.anyOutcome")}</option>
+          <option value="ok">{t("cp.audit.succeeded")}</option>
+          <option value="denied">{t("cp.audit.denied")}</option>
+          <option value="error">{t("cp.audit.failed")}</option>
         </Select>
-        <span className="text-xs text-ink-faint">{total} entries</span>
+        <span className="text-xs text-ink-faint">{t("cp.audit.entries", { count: total })}</span>
         <span className="flex-1" />
-        <button onClick={() => void load()} className="grid h-9 w-9 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100" title="Refresh">
+        <button onClick={() => void load()} className="grid h-9 w-9 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100" title={t("desktop.refresh")}>
           <RefreshCw size={16} className={loading ? "animate-spin" : ""} />
         </button>
       </div>
 
       <div className="opennas-scroll min-h-0 flex-1 overflow-auto rounded-xl ring-1 ring-slate-200">
         {data === null ? (
-          <p className="p-6 text-sm text-ink-faint">Loading...</p>
+          <p className="p-6 text-sm text-ink-faint">{t("desktop.loading")}</p>
         ) : data.entries.length === 0 ? (
-          <p className="p-6 text-center text-sm text-ink-faint">Nothing matches.</p>
+          <p className="p-6 text-center text-sm text-ink-faint">{t("cp.audit.noMatches")}</p>
         ) : (
           <table className="w-full text-left text-xs">
             <thead className="sticky top-0 bg-slate-50 text-ink-faint">
               <tr>
                 <th className="w-6" />
-                <th className="px-3 py-2 font-medium">When</th>
-                <th className="px-3 py-2 font-medium">Action</th>
-                <th className="px-3 py-2 font-medium">Who</th>
-                <th className="px-3 py-2 font-medium">Target</th>
-                <th className="px-3 py-2 font-medium">Outcome</th>
+                <th className="px-3 py-2 font-medium">{t("cp.audit.when")}</th>
+                <th className="px-3 py-2 font-medium">{t("cp.audit.action")}</th>
+                <th className="px-3 py-2 font-medium">{t("cp.audit.who")}</th>
+                <th className="px-3 py-2 font-medium">{t("cp.audit.target")}</th>
+                <th className="px-3 py-2 font-medium">{t("cp.audit.outcome")}</th>
               </tr>
             </thead>
             <tbody>
@@ -142,11 +144,11 @@ export function Audit() {
       {pages > 1 && (
         <div className="mt-3 flex items-center justify-center gap-2 text-xs">
           <Button variant="secondary" className="h-8 px-3 text-xs" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
-            Previous
+            {t("cp.audit.previous")}
           </Button>
-          <span className="text-ink-faint">Page {page + 1} of {pages}</span>
+          <span className="text-ink-faint">{t("cp.audit.pageOf", { page: page + 1, pages })}</span>
           <Button variant="secondary" className="h-8 px-3 text-xs" disabled={page + 1 >= pages} onClick={() => setPage((p) => p + 1)}>
-            Next
+            {t("cp.audit.next")}
           </Button>
         </div>
       )}

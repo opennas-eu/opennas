@@ -4,6 +4,7 @@ import type { AppSettingField, AppSettingValue, AppSettingsResponse } from "@ope
 import { api, ApiRequestError } from "../../lib/api.ts";
 import { useNotifications } from "../../store/notifications.ts";
 import { Button, Field, Input, Select, Toggle } from "../ui/controls.tsx";
+import { useT } from "../../i18n/index.ts";
 
 /**
  * The settings form for one installed app.
@@ -16,6 +17,7 @@ import { Button, Field, Input, Select, Toggle } from "../ui/controls.tsx";
 export function AppSettingsPanel({
   appId, appName, onClose,
 }: { appId: string; appName: string; onClose: () => void }) {
+  const t = useT();
   const push = useNotifications((s) => s.push);
   const [data, setData] = useState<AppSettingsResponse | null>(null);
   const [draft, setDraft] = useState<Record<string, AppSettingValue>>({});
@@ -40,9 +42,9 @@ export function AppSettingsPanel({
       const res = await api.put<AppSettingsResponse>(`/apps/${appId}/settings`, { values: draft });
       setData(res);
       setDraft(res.values);
-      push({ level: "success", title: "Settings saved", body: appName });
+      push({ level: "success", title: t("app.appSettings.saved"), body: appName });
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't save those settings.");
+      setError(err instanceof ApiRequestError ? err.message : t("app.appSettings.saveFailed"));
     } finally {
       setBusy(false);
     }
@@ -57,15 +59,15 @@ export function AppSettingsPanel({
     <div className="mt-2 rounded-xl bg-white p-3.5 ring-1 ring-slate-200">
       <div className="mb-2 flex items-center justify-between">
         <h4 className="flex items-center gap-1.5 text-sm font-semibold text-ink-soft">
-          <SlidersHorizontal size={15} /> {appName} settings
+          <SlidersHorizontal size={15} /> {t("app.appSettings.title", { name: appName })}
         </h4>
-        <button onClick={onClose} aria-label="Close" className="grid h-7 w-7 place-items-center rounded-lg text-ink-faint hover:bg-slate-100">
+        <button onClick={onClose} aria-label={t("desktop.close")} className="grid h-7 w-7 place-items-center rounded-lg text-ink-faint hover:bg-slate-100">
           <X size={15} />
         </button>
       </div>
 
       {data.fields.length === 0 ? (
-        <p className="text-xs text-ink-faint">This app doesn't have any settings.</p>
+        <p className="text-xs text-ink-faint">{t("app.appSettings.none")}</p>
       ) : (
         <div className="space-y-3">
           {data.fields.map((f: AppSettingField) => (
@@ -128,11 +130,11 @@ export function AppSettingsPanel({
 
       {data.fields.length > 0 && (
         <div className="mt-3 flex items-center gap-2">
-          <Button className="h-8 px-3 text-xs" loading={busy} onClick={save} disabled={!dirty}>Save</Button>
-          {dirty && <span className="text-xs text-ink-faint">Unsaved changes</span>}
+          <Button className="h-8 px-3 text-xs" loading={busy} onClick={save} disabled={!dirty}>{t("common.save")}</Button>
+          {dirty && <span className="text-xs text-ink-faint">{t("app.appSettings.unsaved")}</span>}
           <span className="flex-1" />
           {!data.canEditAdmin && (
-            <span className="text-[11px] text-ink-faint">Some settings are only editable by an administrator.</span>
+            <span className="text-[11px] text-ink-faint">{t("app.appSettings.adminOnly")}</span>
           )}
         </div>
       )}
@@ -141,12 +143,13 @@ export function AppSettingsPanel({
 }
 
 function AdminBadge() {
+  const t = useT();
   return (
     <span
       className="inline-flex items-center gap-1 rounded-full bg-slate-100 px-1.5 text-[10px] font-normal text-ink-faint"
-      title="One value for everyone on this NAS; only an administrator can change it."
+      title={t("app.appSettings.sharedHint")}
     >
-      <Lock size={9} /> shared
+      <Lock size={9} /> {t("app.appSettings.shared")}
     </span>
   );
 }

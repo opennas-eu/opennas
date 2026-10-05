@@ -5,6 +5,8 @@ import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { confirmDialog } from "../../../store/dialogs.ts";
 import { Button } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
+import { fillElements } from "./fillElements.tsx";
 
 /**
  * Updating OpenNAS itself.
@@ -18,6 +20,7 @@ import { Button } from "../../ui/controls.tsx";
  * would report a *successful* update as a broken one.
  */
 export function SelfUpdate() {
+  const t = useT();
   const [data, setData] = useState<SelfUpdateResponse | null>(null);
   const [busy, setBusy] = useState<"check" | "apply" | "rollback" | null>(null);
   const [restarting, setRestarting] = useState(false);
@@ -53,23 +56,21 @@ export function SelfUpdate() {
   async function apply() {
     if (!data?.available) return;
     const ok = await confirmDialog({
-      title: `Update OpenNAS to ${data.available.version}?`,
-      message:
-        "The web interface goes away for up to a minute while it restarts. If the new version doesn't come back, " +
-        "OpenNAS puts the previous one back by itself - you don't need to be here for that, and nothing on your disks is touched.",
-      confirmLabel: "Update now",
+      title: t("cp.selfUpdate.confirmTitle", { version: data.available.version }),
+      message: t("cp.selfUpdate.confirmMessage"),
+      confirmLabel: t("cp.selfUpdate.updateNow"),
     });
     if (!ok) return;
     setBusy("apply");
     try {
       await api.post("/admin/update/opennas", {});
       setRestarting(true);
-      push({ level: "info", title: "Updating", body: "OpenNAS is restarting. This page will come back on its own." });
+      push({ level: "info", title: t("cp.selfUpdate.updating"), body: t("cp.selfUpdate.updatingBody") });
     } catch (err) {
       push({
         level: "warning",
-        title: "Couldn't start the update",
-        body: err instanceof ApiRequestError ? err.message : "Failed.",
+        title: t("cp.selfUpdate.startFailed"),
+        body: err instanceof ApiRequestError ? err.message : t("cp.failed"),
       });
     } finally {
       setBusy(null);
@@ -78,9 +79,9 @@ export function SelfUpdate() {
 
   async function rollback() {
     const ok = await confirmDialog({
-      title: "Go back to the previous version?",
-      message: "OpenNAS restarts on the version you were running before the last update.",
-      confirmLabel: "Roll back",
+      title: t("cp.selfUpdate.rollbackTitle"),
+      message: t("cp.selfUpdate.rollbackMessage"),
+      confirmLabel: t("cp.selfUpdate.rollBack"),
       danger: true,
     });
     if (!ok) return;
@@ -91,8 +92,8 @@ export function SelfUpdate() {
     } catch (err) {
       push({
         level: "warning",
-        title: "Couldn't roll back",
-        body: err instanceof ApiRequestError ? err.message : "Failed.",
+        title: t("cp.selfUpdate.rollbackFailed"),
+        body: err instanceof ApiRequestError ? err.message : t("cp.failed"),
       });
     } finally {
       setBusy(null);
@@ -105,27 +106,26 @@ export function SelfUpdate() {
   return (
     <section className="mb-6">
       <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-ink-soft">
-        <ArrowUpCircle size={15} /> OpenNAS updates
+        <ArrowUpCircle size={15} /> {t("cp.selfUpdate.title")}
       </h3>
 
       {!data.supported ? (
         <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-ink-faint ring-1 ring-slate-200/70">
-          Automatic updates are unavailable for this installation. Update it using the method you used to install it.
-          Update it the same way you installed it.
+          {t("cp.selfUpdate.unsupported")}
         </p>
       ) : (
         <>
           <div className="mb-2 flex flex-wrap items-center gap-2">
             <span className="text-sm text-ink-soft">
-              Running <strong>{data.current}</strong>
+              {fillElements(t("cp.selfUpdate.running"), { version: <strong>{data.current}</strong> })}
             </span>
             {data.available ? (
               <span className="rounded-full bg-brand-100 px-2 py-0.5 text-[11px] font-medium text-brand-700">
-                {data.available.version} available
+                {t("cp.selfUpdate.available", { version: data.available.version })}
               </span>
             ) : (
               <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
-                up to date
+                {t("cp.selfUpdate.upToDate")}
               </span>
             )}
           </div>
@@ -139,7 +139,7 @@ export function SelfUpdate() {
           {(restarting || st.state === "running") && (
             <p className="mb-2 flex items-start gap-2 rounded-lg bg-slate-100 px-3 py-2 text-xs text-ink-soft ring-1 ring-slate-200">
               <Loader2 size={13} className="mt-0.5 shrink-0 animate-spin" />
-              <span>{st.message || "Updating..."} This page will reconnect automatically.</span>
+              <span>{st.message || t("cp.selfUpdate.updatingEllipsis")} {t("cp.selfUpdate.reconnect")}</span>
             </p>
           )}
           {st.state === "ok" && !restarting && (
@@ -163,16 +163,16 @@ export function SelfUpdate() {
 
           <div className="flex flex-wrap items-center gap-2">
             <Button variant="secondary" className="h-8 px-3 text-xs" loading={busy === "check"} onClick={() => void check()}>
-              Check now
+              {t("cp.selfUpdate.checkNow")}
             </Button>
             {data.available && (
               <Button className="h-8 px-3 text-xs" loading={busy === "apply"} disabled={restarting} onClick={() => void apply()}>
-                <ArrowUpCircle size={13} /> Update to {data.available.version}
+                <ArrowUpCircle size={13} /> {t("cp.selfUpdate.updateTo", { version: data.available.version })}
               </Button>
             )}
             {(st.state === "ok" || st.state === "failed") && (
               <Button variant="ghost" className="h-8 px-3 text-xs" loading={busy === "rollback"} onClick={() => void rollback()}>
-                <RotateCcw size={13} /> Go back
+                <RotateCcw size={13} /> {t("cp.selfUpdate.goBack")}
               </Button>
             )}
           </div>
@@ -180,9 +180,7 @@ export function SelfUpdate() {
           <p className="mt-2 flex items-start gap-1.5 text-[11px] text-ink-faint">
             <ShieldCheck size={12} className="mt-0.5 shrink-0" />
             <span>
-              Every update is signed, and the signature is checked by a part of the system the web interface can't
-              reach - so a flaw in this page can't be turned into installing something. If a new version doesn't start,
-              the previous one is restored automatically.
+              {t("cp.selfUpdate.signedNote")}
             </span>
           </p>
         </>

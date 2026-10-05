@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { FastifyBaseLogger, FastifyInstance } from "fastify";
 import { z } from "zod";
 import type {
@@ -32,7 +33,7 @@ import {
 } from "./repos.js";
 import { getInstalledApp, listInstalledApps } from "../db/installed-apps.js";
 import { AppError, commitPackage, validatePackage } from "./framework.js";
-import { prepareInstall, reviewPackage, stagePackage } from "./staging.js";
+import { assertPackageId, prepareInstall, reviewPackage, stagePackage } from "./staging.js";
 import { notifyAdmins } from "../notifications/hub.js";
 
 /**
@@ -78,11 +79,24 @@ class RepoError extends Error {
   }
 }
 
+/**
+ * The sha256 each repository's catalogue last advertised per app, keyed
+ * `repoId:appId`. A download that doesn't send `X-Onpkg-Sha256` is checked
+ * against this instead, so a package swapped in transit (or on a mirror) after
+ * the catalogue was fetched is refused rather than installed.
+ */
+const catalogHashes = new Map<string, string>();
+
 /** Normalise one catalogue entry from one repository. */
 function toRepoApp(raw: unknown, repo: AppRepo, installed: Set<string>): RepoApp | null {
   const a = raw as Record<string, unknown>;
   const id = String(a.id ?? "");
   if (!ID_RE.test(id)) return null;
+  if (typeof a.sha256 === "string" && /^[a-f0-9]{64}$/i.test(a.sha256)) {
+    catalogHashes.set(`${repo.id}:${id}`, a.sha256.toLowerCase());
+  } else {
+    catalogHashes.delete(`${repo.id}:${id}`);
+  }
   const shots = Array.isArray(a.screenshots) ? a.screenshots : [];
   const asset = (kind: string, n?: number) =>
     `/apps/repo/asset?repo=${encodeURIComponent(repo.id)}&app=${encodeURIComponent(id)}&kind=${kind}` +
@@ -189,10 +203,25 @@ async function loadCatalog(): Promise<RepoCatalogResponse> {
  * Download one package. `repoId` says which repository to ask; when it's absent
  * or no longer configured the enabled repositories are tried in priority order,
  * which is what keeps an app installed before a repo was removed updatable.
+ *
+ * A repository that is configured but *disabled* is different: the admin turned
+ * it off, and quietly asking every other repository for the same id instead is
+ * how an app ends up taken from a publisher nobody chose. That is an error.
+ *
+ * The bytes are checked against the sha256 the repository advertises (the
+ * download's `X-Onpkg-Sha256`, or failing that its catalogue entry) when it
+ * advertises one at all.
  */
 async function downloadPackage(id: string, repoId?: string | null): Promise<{ buf: Buffer; repoId: string }> {
   const pinned = repoId ? getRepo(repoId) : null;
-  const candidates = pinned && pinned.enabled ? [pinned] : enabledRepos();
+  if (pinned && !pinned.enabled) {
+    throw new RepoError(
+      409,
+      "repo_disabled",
+      `The repository this app comes from (${repoLabel(pinned)}) is disabled. Enable it again to install or update the app.`,
+    );
+  }
+  const candidates = pinned ? [pinned] : enabledRepos();
   if (candidates.length === 0) {
     throw new RepoError(400, "no_repos", "No app repositories are configured.");
   }
@@ -206,9 +235,15 @@ async function downloadPackage(id: string, repoId?: string | null): Promise<{ bu
       }
       const ab = await res.arrayBuffer();
       if (ab.byteLength > 64 * 1024 * 1024) throw new RepoError(413, "too_large", "That package is too large.");
-      return { buf: Buffer.from(ab), repoId: repo.id };
+      const buf = Buffer.from(ab);
+      const header = res.headers.get("x-onpkg-sha256")?.trim().toLowerCase();
+      const expected = header || catalogHashes.get(`${repo.id}:${id}`);
+      if (expected && createHash("sha256").update(buf).digest("hex") !== expected) {
+        throw new RepoError(502, "integrity", "The downloaded package doesn't match the checksum the repository published.");
+      }
+      return { buf, repoId: repo.id };
     } catch (err) {
-      if (err instanceof RepoError && err.code === "too_large") throw err;
+      if (err instanceof RepoError && (err.code === "too_large" || err.code === "integrity")) throw err;
       lastError = new RepoError(502, "repo_unreachable", "Couldn't download from the repository.");
     }
   }
@@ -323,9 +358,10 @@ type UpdateOutcome =
  * install - download, validate + verify, then commit - so the app's files are
  * replaced while the DB upsert keeps its enabled state and per-user data.
  *
- * The permission check is re-derived from the downloaded package here (not from
+ * The consent check is re-derived from the downloaded package here (not from
  * the catalogue), so a new version that quietly asks for more than the user
- * granted is staged for review instead of installed.
+ * granted - or comes from a different or untrusted signer - is staged for review
+ * instead of installed.
  */
 async function applyUpdate(id: string): Promise<UpdateOutcome> {
   // Pinned to the repository this app was installed from. Without that, adding
@@ -334,11 +370,13 @@ async function applyUpdate(id: string): Promise<UpdateOutcome> {
   const source = getInstalledApp(id)?.sourceRepo ?? null;
   const { buf, repoId } = await downloadPackage(id, source);
   const pkg = validatePackage(buf);
+  assertPackageId(pkg, id);
   const { needsConsent, details } = reviewPackage(pkg);
-  // An update from an already-trusted publisher that asks for nothing new goes
-  // straight in; anything else needs a person to look at it.
-  if (needsConsent && details.newPermissions.length > 0) {
-    return { kind: "pending", pending: stagePackage(pkg, details) };
+  // An update signed by the same trusted publisher as the installed version that
+  // asks for nothing new goes straight in; anything else - new permissions, an
+  // unsigned or untrusted package, a different signing key - needs a person.
+  if (needsConsent) {
+    return { kind: "pending", pending: stagePackage(pkg, details, repoId) };
   }
   const manifest = await commitPackage(pkg, repoId);
   return { kind: "updated", id: manifest.id, name: manifest.name, version: manifest.version ?? "0.0.0" };
@@ -368,16 +406,17 @@ export function startAppUpdateChecker(log: FastifyBaseLogger): () => void {
       try {
         const done = await applyUpdate(u.id);
         if (done.kind === "pending") {
-          // Never silently widen what an app is allowed to do. This one waits
-          // for an admin to approve it in App Center.
-          log.warn(
-            { app: u.id, wants: done.pending.newPermissions },
-            "app update needs permission approval - not auto-installed",
-          );
+          // Never silently widen what an app is allowed to do, or who it is
+          // from. This one waits for an admin to approve it in App Center.
+          const wants = done.pending.newPermissions;
+          log.warn({ app: u.id, wants, verified: done.pending.verified }, "app update needs approval - not auto-installed");
           notifyAdmins({
             level: "warning",
             title: `${u.name} v${u.availableVersion} needs your approval`,
-            body: `The update asks for new permissions (${done.pending.newPermissions.join(", ")}), so it wasn't installed automatically. Review it in App Center.`,
+            body:
+              wants.length > 0
+                ? `The update asks for new permissions (${wants.join(", ")}), so it wasn't installed automatically. Review it in App Center.`
+                : "The update isn't signed by the trusted publisher of the installed version, so it wasn't installed automatically. Review it in App Center.",
             appId: "app-center",
             dedupeKey: `app-update-consent:${u.id}`,
           });
@@ -518,7 +557,7 @@ export async function repoRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(e.status).send({ error: e.code, message: e.message }) as never;
     }
     try {
-      const outcome = await prepareInstall(buf, fromRepo);
+      const outcome = await prepareInstall(buf, fromRepo, parsed.data.id);
       if (outcome.kind === "pending") return reply.code(202).send({ pending: outcome.pending }) as never;
       lastCheck = null; // installed set changed → recompute on the next check
       return reply.code(201).send({ app: outcome.manifest }) as never;

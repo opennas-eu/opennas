@@ -136,6 +136,20 @@ export function shareHasAcls(shareId: string): boolean {
 }
 
 /**
+ * Folder-rule paths strictly below `relPath` in a share ("" means the whole
+ * share). A subtree can only differ in access from its root where a rule sits,
+ * so these are the only places an operation on a whole folder has to look.
+ */
+export function aclPathsBelow(shareId: string, relPath: string): string[] {
+  const base = normalizeAclPath(relPath);
+  const rows = db.prepare("SELECT DISTINCT path FROM folder_acls WHERE share_id = ?").all(shareId) as { path: string }[];
+  return rows
+    .map((r) => r.path)
+    .filter((p) => (base ? p.startsWith(base + "/") : p.length > 0))
+    .sort();
+}
+
+/**
  * Apply a share's folder rules to one path. `shareLevel` is what the share grant
  * already decided; `relPath` is relative to the share root ("" for the root).
  */

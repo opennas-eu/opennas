@@ -5,6 +5,8 @@ import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { confirmDialog } from "../../../store/dialogs.ts";
 import { Button, Input, Select } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
+import { fillElements } from "./fillElements.tsx";
 
 /**
  * Who may mount one share over NFS.
@@ -25,6 +27,7 @@ export function NfsRules({ share, globalNetworks, onChanged }: {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const push = useNotifications((s) => s.push);
+  const t = useT();
 
   async function add() {
     setBusy("add");
@@ -34,7 +37,7 @@ export function NfsRules({ share, globalNetworks, onChanged }: {
       setNetwork("");
       await onChanged();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't add that rule.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.folderRules.addFailed"));
     } finally {
       setBusy(null);
     }
@@ -45,11 +48,14 @@ export function NfsRules({ share, globalNetworks, onChanged }: {
     // from, so that has to be said rather than discovered.
     const last = share.nfsRules.length === 1;
     const ok = await confirmDialog({
-      title: `Remove the rule for ${rule.network}?`,
+      title: t("cp.nfsRules.removeTitle", { network: rule.network }),
       message: last
-        ? `That's the only rule on this share, so it goes back to inheriting the global list (${globalNetworks || "*"}) at ${share.guestAccess === "rw" ? "read & write" : "read-only"}.`
-        : "Clients on that network will no longer be able to mount this share.",
-      confirmLabel: "Remove",
+        ? t("cp.nfsRules.removeLast", {
+          networks: globalNetworks || "*",
+          level: share.guestAccess === "rw" ? t("cp.nfsRules.levelRw") : t("cp.nfsRules.levelRo"),
+        })
+        : t("cp.nfsRules.removeMessage"),
+      confirmLabel: t("common.remove"),
       danger: true,
     });
     if (!ok) return;
@@ -58,7 +64,7 @@ export function NfsRules({ share, globalNetworks, onChanged }: {
       await api.del(`/admin/shares/${share.id}/nfs-rules/${rule.id}`);
       await onChanged();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't remove that rule", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.nfsRules.removeFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     } finally {
       setBusy(null);
     }
@@ -67,19 +73,20 @@ export function NfsRules({ share, globalNetworks, onChanged }: {
   return (
     <div>
       <h4 className="mb-1 flex items-center gap-2 text-sm font-semibold text-ink-soft">
-        <Network size={15} /> NFS access
+        <Network size={15} /> {t("cp.nfsRules.title")}
       </h4>
       <p className="mb-2 text-xs text-ink-faint">
-        NFS has no sign-in - it trusts whichever machine connects, so these addresses are the whole of the access
-        control. Keep the list as narrow as you can.
+        {t("cp.nfsRules.intro")}
       </p>
 
       {share.nfsRules.length === 0 ? (
         <p className="mb-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-ink-faint ring-1 ring-slate-200/70">
-          No rules of its own, so this share uses the global list -{" "}
-          <strong className="text-ink-soft">{globalNetworks || "anyone"}</strong>, at{" "}
-          {share.guestAccess === "rw" ? "read & write" : "read-only"} (inherited from guest access, which is really an
-          SMB setting). Add a rule below to decide it here instead.
+          {fillElements(
+            t("cp.nfsRules.inherited", {
+              level: share.guestAccess === "rw" ? t("cp.nfsRules.levelRw") : t("cp.nfsRules.levelRo"),
+            }),
+            { networks: <strong className="text-ink-soft">{globalNetworks || t("cp.nfsRules.anyone")}</strong> },
+          )}
         </p>
       ) : (
         <ul className="mb-2 space-y-1.5">
@@ -88,10 +95,10 @@ export function NfsRules({ share, globalNetworks, onChanged }: {
               <div className="min-w-0 flex-1">
                 <span className="block truncate font-mono text-xs text-ink-soft">{r.network}</span>
                 <span className="flex flex-wrap items-center gap-1.5 text-[11px] text-ink-faint">
-                  {r.level === "rw" ? "read & write" : "read-only"}
+                  {r.level === "rw" ? t("cp.nfsRules.levelRw") : t("cp.nfsRules.levelRo")}
                   {!r.rootSquash && (
                     <span className="inline-flex items-center gap-1 rounded-full bg-rose-100 px-1.5 py-px font-medium text-rose-700">
-                      <ShieldAlert size={9} /> root not squashed
+                      <ShieldAlert size={9} /> {t("cp.nfsRules.notSquashed")}
                     </span>
                   )}
                 </span>
@@ -99,7 +106,7 @@ export function NfsRules({ share, globalNetworks, onChanged }: {
               <button
                 onClick={() => void remove(r)}
                 disabled={busy === r.id}
-                title="Remove rule"
+                title={t("cp.folderRules.removeRule")}
                 className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink-soft transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
               >
                 <Trash2 size={14} />
@@ -118,8 +125,8 @@ export function NfsRules({ share, globalNetworks, onChanged }: {
           className="h-8 w-44 text-xs"
         />
         <Select value={level} onChange={(e) => setLevel(e.target.value as "ro" | "rw")} className="h-8 w-32 py-0 text-xs">
-          <option value="ro">Read only</option>
-          <option value="rw">Read &amp; write</option>
+          <option value="ro">{t("common.readOnly")}</option>
+          <option value="rw">{t("common.readWrite")}</option>
         </Select>
         <label className="inline-flex items-center gap-1.5 text-[11px] text-ink-faint">
           <input
@@ -128,10 +135,10 @@ export function NfsRules({ share, globalNetworks, onChanged }: {
             onChange={(e) => setRootSquash(e.target.checked)}
             className="h-3.5 w-3.5 rounded border-slate-300"
           />
-          Squash remote root
+          {t("cp.nfsRules.squash")}
         </label>
         <Button className="h-8 px-3 text-xs" loading={busy === "add"} disabled={!network.trim()} onClick={() => void add()}>
-          <Plus size={13} /> Add
+          <Plus size={13} /> {t("common.add")}
         </Button>
       </div>
 
@@ -139,8 +146,7 @@ export function NfsRules({ share, globalNetworks, onChanged }: {
         <p className="mt-2 flex items-start gap-2 rounded-lg bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700 ring-1 ring-rose-200">
           <ShieldAlert size={12} className="mt-0.5 shrink-0" />
           <span>
-            Without root squashing, anyone with root on a machine at that address owns every file in this share and can
-            change any of it. Only do this for a machine you control as completely as this one.
+            {t("cp.nfsRules.noSquashWarning")}
           </span>
         </p>
       )}

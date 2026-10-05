@@ -6,6 +6,22 @@ set -eu
 
 partname() { case "$1" in *[0-9]) echo "${1}p1";; *) echo "${1}1";; esac; }
 
+# volume_root_prep <dir> - a volume's mount directory is root's, so the service
+# account cannot swap a share directory inside it for a symlink after
+# `opennas-sysctl share-apply` has checked it. Shares get their directories from
+# `opennas-sysctl share-dir`; VM disks and container data go in an `opennas`
+# directory inside, which is the service account's.
+volume_root_prep() {
+	[ -d "$1" ] && [ ! -L "$1" ] || return 0
+	chown -h 0:0 "$1" 2>/dev/null || true
+	{ [ ! -L "$1" ] && [ -O "$1" ]; } || return 0
+	chmod 0755 "$1" 2>/dev/null || true
+	if [ ! -e "$1/opennas" ] && [ ! -L "$1/opennas" ]; then
+		mkdir -m 0755 "$1/opennas" 2>/dev/null && chown -h opennas:opennas "$1/opennas" 2>/dev/null || true
+	fi
+	return 0
+}
+
 # ---- Per-share quotas ------------------------------------------------------
 #
 # Implemented with *project* quotas, which is the only kind that means anything
@@ -30,6 +46,58 @@ fstab_set() {
 		rm -f /etc/fstab.new
 	fi
 	echo "UUID=$_uuid  $_mnt  $_fstype  rw,relatime  0 2" >> /etc/fstab
+}
+
+# Drop the fstab entry whose mountpoint is *exactly* this one. A sed address
+# built from the path matched substrings, so erasing `data` also took the line
+# for `data2`.
+fstab_remove() {
+	[ -f /etc/fstab ] || return 0
+	awk -v mnt="$1" '$2 != mnt' /etc/fstab > /etc/fstab.new && cat /etc/fstab.new > /etc/fstab
+	rm -f /etc/fstab.new
+}
+
+# Drop the mdadm.conf ARRAY line for exactly this array - by its device field or
+# its UUID token, never by substring (removing md1 must leave md10 alone).
+mdadm_conf_remove() {
+	_md="$1"; _uuid="$2"
+	[ -f /etc/mdadm.conf ] || return 0
+	awk -v md="$_md" -v short="/dev/md/${_md#/dev/md}" -v uuid="$_uuid" '
+		$1 == "ARRAY" && ($2 == md || $2 == short) { next }
+		$1 == "ARRAY" && uuid != "" { for (i = 3; i <= NF; i++) if ($i == "UUID=" uuid) next }
+		{ print }' /etc/mdadm.conf > /etc/mdadm.conf.new && cat /etc/mdadm.conf.new > /etc/mdadm.conf
+	rm -f /etc/mdadm.conf.new
+}
+
+# A whole-disk node smartctl may be pointed at. smartctl takes options and
+# device-type prefixes, so nothing but a plain /dev/<disk> gets through.
+valid_disk() {
+	case "$1" in
+		/dev/sd[a-z]*|/dev/vd[a-z]*|/dev/hd[a-z]*|/dev/xvd[a-z]*) _rest="${1#/dev/}"; case "$_rest" in *[!a-z]*) return 1;; esac ;;
+		/dev/nvme[0-9]*n[0-9]*|/dev/mmcblk[0-9]*) _rest="${1#/dev/}"; case "$_rest" in *[!a-z0-9]*) return 1;; esac ;;
+		*) return 1 ;;
+	esac
+	[ -b "$1" ]
+}
+
+# Is a disk genuinely unused? "Nothing mounted" is not enough: a member of a
+# stopped md array, a disk holding an exported ZFS pool, an LVM PV or a LUKS
+# container all look unmounted and are full of somebody's data. So refuse any
+# member signature anywhere on the disk, and anything stacked on top of it.
+disk_unused() {
+	_d="$1"
+	if lsblk -nro MOUNTPOINT "$_d" 2>/dev/null | grep -q .; then
+		echo "disk is in use (something on it is mounted): $_d" >&2; return 1
+	fi
+	if lsblk -nro FSTYPE "$_d" 2>/dev/null | grep -qE '^(linux_raid_member|zfs_member|LVM2_member|crypto_LUKS|bcache|ceph_bluestore|drbd|swap)$'; then
+		echo "disk is a member of an array, pool or volume group: $_d" >&2; return 1
+	fi
+	# Anything that is not the disk itself or a plain partition is a holder:
+	# an md array, a dm/LVM/crypt mapping, a loop device on top of it.
+	if lsblk -nro TYPE "$_d" 2>/dev/null | grep -qvE '^(disk|part)$'; then
+		echo "disk is part of an array or mapped device: $_d" >&2; return 1
+	fi
+	return 0
 }
 
 quota_mnt() {
@@ -57,10 +125,8 @@ init)
 	case "$label" in ""|*[!a-zA-Z0-9_-]*) echo "invalid label" >&2; exit 1;; esac
 	case "$fstype" in ext4|btrfs|xfs) ;; *) echo "invalid filesystem" >&2; exit 1;; esac
 	[ -b "$disk" ] || { echo "not a block device: $disk" >&2; exit 1; }
-	# Safety: never touch a disk that has anything mounted.
-	if lsblk -nro MOUNTPOINT "$disk" | grep -q .; then
-		echo "disk is in use (something on it is mounted)" >&2; exit 1
-	fi
+	# Safety: never touch a disk that has anything on it in use.
+	disk_unused "$disk" || exit 1
 
 	wipefs -aq "$disk"
 	sfdisk "$disk" <<SFD
@@ -84,7 +150,7 @@ SFD
 	[ -n "$uuid" ] || { echo "could not read new filesystem UUID" >&2; exit 1; }
 	fstab_set "$mnt" "$uuid" "$fstype"
 	mount "$mnt"
-	chown opennas:opennas "$mnt" 2>/dev/null || true
+	volume_root_prep "$mnt"
 	echo "initialized $disk -> $mnt ($fstype)"
 	;;
 freespace)
@@ -112,7 +178,13 @@ init-free)
 	case "$disk" in /dev/*) ;; *) echo "invalid disk path" >&2; exit 1;; esac
 	case "$label" in ""|*[!a-zA-Z0-9_-]*) echo "invalid label" >&2; exit 1;; esac
 	case "$fstype" in ext4|btrfs|xfs) ;; *) echo "invalid filesystem" >&2; exit 1;; esac
-	case "$size" in ""|*[0-9][GMgm]) ;; *) echo "invalid size (use e.g. 500G)" >&2; exit 1;; esac
+	# Digits then one unit letter, and nothing else: the value is spliced into an
+	# sfdisk script, where a comma or a newline would be a second instruction.
+	if [ -n "$size" ]; then
+		num="${size%[GMgm]}"
+		case "$num" in ""|*[!0-9]*) echo "invalid size (use e.g. 500G)" >&2; exit 1;; esac
+		[ "$num" != "$size" ] || { echo "invalid size (use e.g. 500G)" >&2; exit 1; }
+	fi
 	[ -b "$disk" ] || { echo "not a block device: $disk" >&2; exit 1; }
 	[ -e "/var/lib/opennas/volumes/$label" ] && { echo "a volume named '$label' already exists" >&2; exit 1; }
 
@@ -162,7 +234,7 @@ init-free)
 	[ -n "$uuid" ] || { echo "could not read new filesystem UUID" >&2; exit 1; }
 	fstab_set "$mnt" "$uuid" "$fstype"
 	mount "$mnt"
-	chown opennas:opennas "$mnt" 2>/dev/null || true
+	volume_root_prep "$mnt"
 	echo "created $part -> $mnt ($fstype)"
 	;;
 
@@ -274,6 +346,7 @@ mount|unmount|erase)
 	mount)
 		mkdir -p "$mnt"
 		mount "$mnt" 2>/dev/null || mount -L "$label" "$mnt"
+		volume_root_prep "$mnt"
 		;;
 	unmount)
 		umount "$mnt"
@@ -283,7 +356,7 @@ mount|unmount|erase)
 		umount "$mnt" 2>/dev/null || true
 		[ -n "$src" ] || src="$(blkid -L "$label" 2>/dev/null || true)"
 		[ -n "$src" ] && wipefs -aq "$src" || true
-		sed -i "\\#${mnt}#d" /etc/fstab 2>/dev/null || true
+		fstab_remove "$mnt" 2>/dev/null || true
 		rmdir "$mnt" 2>/dev/null || true
 		;;
 	esac
@@ -307,7 +380,7 @@ raid-create)
 	for d in "$@"; do
 		case "$d" in /dev/*) ;; *) echo "invalid disk path: $d" >&2; exit 1;; esac
 		[ -b "$d" ] || { echo "not a block device: $d" >&2; exit 1; }
-		if lsblk -nro MOUNTPOINT "$d" | grep -q .; then echo "disk in use: $d" >&2; exit 1; fi
+		disk_unused "$d" || exit 1
 	done
 	# Pick the first free /dev/mdN.
 	md=""
@@ -333,7 +406,7 @@ raid-create)
 	[ -n "$uuid" ] || { echo "could not read new filesystem UUID" >&2; exit 1; }
 	fstab_set "$mnt" "$uuid" "$fstype"
 	mount "$mnt"
-	chown opennas:opennas "$mnt" 2>/dev/null || true
+	volume_root_prep "$mnt"
 	echo "created $md ($level, $n disks) -> $mnt"
 	;;
 raid-destroy)
@@ -344,12 +417,13 @@ raid-destroy)
 	mnt="$(findmnt -no TARGET "$md" 2>/dev/null || true)"
 	case "$mnt" in /|/boot|/boot/efi) echo "refusing to destroy a system array" >&2; exit 1;; esac
 	members="$(mdadm --detail --export "$md" 2>/dev/null | sed -n 's/^MD_DEVICE_[^=]*_DEV=//p')"
+	uuid="$(mdadm --detail --brief "$md" 2>/dev/null | tr ' ' '\n' | sed -n 's/^UUID=//p' | head -n1)"
 	[ -n "$mnt" ] && umount "$mnt" 2>/dev/null || true
 	mdadm --stop "$md" 2>/dev/null || true
 	for m in $members; do mdadm --zero-superblock "$m" 2>/dev/null || true; done
-	sed -i "\\#${md}#d" /etc/mdadm.conf 2>/dev/null || true
+	mdadm_conf_remove "$md" "$uuid" 2>/dev/null || true
 	if [ -n "$mnt" ]; then
-		sed -i "\\#${mnt}#d" /etc/fstab 2>/dev/null || true
+		fstab_remove "$mnt" 2>/dev/null || true
 		rmdir "$mnt" 2>/dev/null || true
 	fi
 	echo "destroyed $md"
@@ -362,7 +436,7 @@ raid-add)
 	case "$disk" in /dev/*) ;; *) echo "invalid disk path" >&2; exit 1;; esac
 	[ -e "$md" ] || { echo "no such array: $md" >&2; exit 1; }
 	[ -b "$disk" ] || { echo "not a block device: $disk" >&2; exit 1; }
-	if lsblk -nro MOUNTPOINT "$disk" | grep -q .; then echo "disk in use: $disk" >&2; exit 1; fi
+	disk_unused "$disk" || exit 1
 	wipefs -aq "$disk"
 	mdadm --add "$md" "$disk" >/dev/null 2>&1 || { echo "mdadm add failed" >&2; exit 1; }
 	echo "added $disk to $md"
@@ -433,15 +507,24 @@ smart-test)
 	# The drive runs it itself in the background, so this returns as soon as it
 	# is accepted; results are read back with the usual SMART query.
 	disk="${2:?disk}"; kind="${3:-short}"
-	case "$disk" in /dev/*) ;; *) echo "invalid disk path" >&2; exit 1;; esac
-	[ -b "$disk" ] || { echo "no such disk: $disk" >&2; exit 1; }
+	valid_disk "$disk" || { echo "invalid disk: $disk" >&2; exit 1; }
 	case "$kind" in short|long) ;; *) echo "invalid test type" >&2; exit 1;; esac
 	command -v smartctl >/dev/null 2>&1 || { echo "smartmontools is not installed" >&2; exit 1; }
 	smartctl -t "$kind" "$disk" 2>&1
 	;;
 
+smart)
+	# smart <disk> - health, attributes and identity as JSON, for the Storage
+	# dashboard. smartctl reports warnings through its exit status while still
+	# printing valid JSON, so the status is passed through untouched.
+	disk="${2:?disk}"
+	valid_disk "$disk" || { echo "invalid disk: $disk" >&2; exit 1; }
+	command -v smartctl >/dev/null 2>&1 || { echo "smartmontools is not installed" >&2; exit 1; }
+	exec smartctl -j -H -A -i "$disk"
+	;;
+
 *)
-	echo "usage: opennas-storage {init|init-free|freespace|mount|unmount|erase|raid-create|raid-destroy|raid-add|raid-remove|scrub|trim|smart-test} ..." >&2
+	echo "usage: opennas-storage {init|init-free|freespace|mount|unmount|erase|raid-create|raid-destroy|raid-add|raid-remove|scrub|trim|smart-test|smart} ..." >&2
 	exit 1
 	;;
 esac

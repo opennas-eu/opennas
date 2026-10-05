@@ -61,7 +61,7 @@ export function Dashboard() {
           onClick={() => open("system-monitor")}
           className="hidden items-center gap-1.5 rounded-lg bg-white px-3 py-2 text-sm font-medium text-ink-soft ring-1 ring-slate-200 transition hover:bg-slate-100 sm:flex"
         >
-          <Activity size={15} /> Resource Monitor
+          <Activity size={15} /> {t("app.monitor.title")}
         </button>
       </header>
 
@@ -78,7 +78,7 @@ export function Dashboard() {
         <Widget className="row-span-2 flex flex-col items-center justify-center" onClick={() => open("system-monitor")}>
           <RadialGauge value={memPct} label={t("dash.memory")} sublabel={latest ? formatBytes(latest.memory.usedBytes) : ""} color="#3b82f6" />
           <div className="mt-3 text-center text-xs text-ink-faint">
-            {latest ? `${formatBytes(latest.memory.freeBytes)} free of ${formatBytes(latest.memory.totalBytes)}` : ""}
+            {latest ? t("app.dash.freeOf", { free: formatBytes(latest.memory.freeBytes), total: formatBytes(latest.memory.totalBytes) }) : ""}
           </div>
         </Widget>
 
@@ -98,12 +98,12 @@ export function Dashboard() {
 
         <StatWidget icon={<Cpu size={16} />} label={t("dash.processes")} onClick={() => open("task-manager")}>
           <div className="text-lg font-semibold text-ink">{latest ? `${latest.processes.running} / ${latest.processes.total}` : <Dim />}</div>
-          <div className="text-[11px] text-ink-faint">running / total</div>
+          <div className="text-[11px] text-ink-faint">{t("app.monitor.runningTotal")}</div>
         </StatWidget>
 
         <StatWidget icon={<Thermometer size={16} />} label={t("dash.temperature")}>
           <div className="text-lg font-semibold text-ink">
-            {latest?.temperature.mainC != null ? `${latest.temperature.mainC} °C` : <span className="text-sm text-ink-faint">n/a</span>}
+            {latest?.temperature.mainC != null ? `${latest.temperature.mainC} °C` : <span className="text-sm text-ink-faint">{t("app.dash.notAvailable")}</span>}
           </div>
         </StatWidget>
       </div>
@@ -144,13 +144,13 @@ export function Dashboard() {
         <section className="mt-4">
           <Widget>
             <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink-soft">
-              <Server size={16} /> System
+              <Server size={16} /> {t("app.dash.system")}
             </div>
             <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm sm:grid-cols-3">
               <Fact label={t("dash.processor")} value={info.cpu.brand} />
-              <Fact label="Cores" value={`${info.cpu.physicalCores} / ${info.cpu.cores} threads`} />
+              <Fact label={t("app.dash.cores")} value={t("app.dash.coresValue", { cores: info.cpu.physicalCores, threads: info.cpu.cores })} />
               <Fact label={t("dash.memory")} value={formatBytes(info.memoryTotalBytes)} />
-              <Fact label="OS" value={`${info.os.distro} ${info.os.release}`} />
+              <Fact label={t("app.dash.os")} value={`${info.os.distro} ${info.os.release}`} />
               <Fact label={t("dash.architecture")} value={info.os.arch} />
               <Fact label="OpenNAS" value={`v${info.opennasVersion}`} />
             </dl>

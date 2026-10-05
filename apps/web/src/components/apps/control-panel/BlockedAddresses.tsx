@@ -4,6 +4,8 @@ import type { IpBan, IpBansResponse } from "@opennas/shared";
 import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { Button, Toggle } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
+import { fillElements } from "./fillElements.tsx";
 
 /**
  * Addresses blocked for repeated failed sign-ins.
@@ -13,6 +15,7 @@ import { Button, Toggle } from "../../ui/controls.tsx";
  * *recorded* then but nothing is dropping anything.
  */
 export function BlockedAddresses({ firewallActive }: { firewallActive: boolean }) {
+  const t = useT();
   const [data, setData] = useState<IpBansResponse | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const push = useNotifications((s) => s.push);
@@ -29,8 +32,8 @@ export function BlockedAddresses({ firewallActive }: { firewallActive: boolean }
     } catch (err) {
       push({
         level: "warning",
-        title: "Couldn't change that",
-        body: err instanceof ApiRequestError ? err.message : "Failed.",
+        title: t("cp.blocked.changeFailed"),
+        body: err instanceof ApiRequestError ? err.message : t("cp.failed"),
       });
     } finally {
       setBusy(null);
@@ -41,12 +44,12 @@ export function BlockedAddresses({ firewallActive }: { firewallActive: boolean }
     setBusy(ban.address);
     try {
       setData(await api.del<IpBansResponse>(`/admin/firewall/bans/${encodeURIComponent(ban.address)}`));
-      push({ level: "success", title: "Unblocked", body: ban.address });
+      push({ level: "success", title: t("cp.blocked.unblocked"), body: ban.address });
     } catch (err) {
       push({
         level: "warning",
-        title: "Couldn't unblock that address",
-        body: err instanceof ApiRequestError ? err.message : "Failed.",
+        title: t("cp.blocked.unblockFailed"),
+        body: err instanceof ApiRequestError ? err.message : t("cp.failed"),
       });
     } finally {
       setBusy(null);
@@ -58,26 +61,22 @@ export function BlockedAddresses({ firewallActive }: { firewallActive: boolean }
   return (
     <section className="mt-6">
       <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-ink-soft">
-        <Ban size={15} /> Blocked addresses
+        <Ban size={15} /> {t("cp.blocked.title")}
       </h3>
       <p className="mb-2 text-xs text-ink-faint">
-        An address that keeps failing to sign in is blocked for an hour. Your own networks are never blocked, so you
-        can't lock yourself out.
+        {t("cp.blocked.intro")}
       </p>
 
       {!firewallActive && data.bans.length > 0 && (
         <p className="mb-2 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 ring-1 ring-amber-200">
           <ShieldOff size={13} className="mt-0.5 shrink-0" />
-          <span>
-            The firewall is off, so nothing is actually being blocked. These are recorded so you can see what would
-            have been - turning the firewall on starts enforcing them.
-          </span>
+          <span>{t("cp.blocked.firewallOff")}</span>
         </p>
       )}
 
       {data.bans.length === 0 ? (
         <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-ink-faint ring-1 ring-slate-200/70">
-          No addresses are blocked.
+          {t("cp.blocked.none")}
         </p>
       ) : (
         <ul className="space-y-1.5">
@@ -87,17 +86,17 @@ export function BlockedAddresses({ firewallActive }: { firewallActive: boolean }
                 <div className="flex flex-wrap items-center gap-1.5">
                   <span className="truncate font-mono text-xs text-ink-soft">{b.address}</span>
                   {b.active ? (
-                    <span className="rounded-full bg-rose-100 px-1.5 py-px text-[10px] font-medium text-rose-700">blocked</span>
+                    <span className="rounded-full bg-rose-100 px-1.5 py-px text-[10px] font-medium text-rose-700">{t("cp.blocked.blocked")}</span>
                   ) : (
                     <span className="rounded-full bg-slate-200 px-1.5 py-px text-[10px] font-medium text-ink-faint">
-                      not enforced
+                      {t("cp.blocked.notEnforced")}
                     </span>
                   )}
                 </div>
                 <span className="block text-[11px] text-ink-faint">
                   {b.reason}
-                  {b.failures > 0 && ` - ${b.failures} failed attempts`}
-                  {` - until ${new Date(b.expiresAt).toLocaleTimeString()}`}
+                  {b.failures > 0 && ` - ${t("cp.blocked.failures", { count: b.failures })}`}
+                  {` - ${t("cp.blocked.until", { time: new Date(b.expiresAt).toLocaleTimeString() })}`}
                 </span>
               </div>
               <Button
@@ -106,7 +105,7 @@ export function BlockedAddresses({ firewallActive }: { firewallActive: boolean }
                 loading={busy === b.address}
                 onClick={() => void lift(b)}
               >
-                Unblock
+                {t("cp.blocked.unblock")}
               </Button>
             </li>
           ))}
@@ -115,10 +114,7 @@ export function BlockedAddresses({ firewallActive }: { firewallActive: boolean }
 
       <p className="mt-2 flex items-start gap-1.5 text-[11px] text-ink-faint">
         <Info size={12} className="mt-0.5 shrink-0" />
-        <span>
-          Blocks are held by the kernel with their own expiry, so they lift themselves even if OpenNAS is stopped - and
-          a restart of the NAS clears them all.
-        </span>
+        <span>{t("cp.blocked.kernelNote")}</span>
       </p>
 
       {/*
@@ -133,30 +129,28 @@ export function BlockedAddresses({ firewallActive }: { firewallActive: boolean }
           <span className="mt-0.5 shrink-0 text-brand-600"><Sparkles size={15} /></span>
           <div className="min-w-0 flex-1">
             <div className="flex items-center justify-between gap-3">
-              <h4 className="text-sm font-medium text-ink-soft">Trap scanners on sight</h4>
+              <h4 className="text-sm font-medium text-ink-soft">{t("cp.blocked.honeypot")}</h4>
               <Toggle
                 checked={data.honeypot.enabled}
                 disabled={busy === "honeypot"}
                 onChange={(next) => void setHoneypot(next)}
-                label="Trap scanners on sight"
+                label={t("cp.blocked.honeypot")}
               />
             </div>
             <p className="mt-1 text-xs text-ink-faint">
-              Most attacks on a NAS never touch the sign-in form - they work through a list of paths hoping to find
-              some other software running. Nothing legitimate ever asks a NAS for those, so one request is enough:
-              the address is blocked for {Math.round(data.honeypot.banSeconds / 60)} minutes straight away, instead of
-              being given the twenty tries the sign-in counter allows.
+              {t("cp.blocked.honeypotBody", {
+                duration: t("cp.blocked.minutes", { count: Math.round(data.honeypot.banSeconds / 60) }),
+              })}
             </p>
             <p className="mt-1.5 text-[11px] text-ink-faint">
-              Watched paths include{" "}
-              {data.honeypot.examples.map((p, i) => (
-                <span key={p}>
-                  {i > 0 && ", "}
-                  <code className="rounded bg-white px-1 py-px font-mono">{p}</code>
-                </span>
-              ))}
-              . Your own network is exempt - loopback, every private range and anything you've marked trusted - so
-              this can only ever block something coming in from the internet.
+              {fillElements(t("cp.blocked.watched"), {
+                paths: data.honeypot.examples.map((p, i) => (
+                  <span key={p}>
+                    {i > 0 && ", "}
+                    <code className="rounded bg-white px-1 py-px font-mono">{p}</code>
+                  </span>
+                )),
+              })}
             </p>
           </div>
         </div>

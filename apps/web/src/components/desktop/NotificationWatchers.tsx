@@ -5,6 +5,7 @@ import { useAuth } from "../../store/auth.ts";
 import { useSystem } from "../../store/system.ts";
 import { useNotifications } from "../../store/notifications.ts";
 import { formatBytes } from "../../lib/format.ts";
+import { tr } from "../../i18n/index.ts";
 
 /**
  * Headless component: watches live telemetry and emits notifications for
@@ -16,7 +17,7 @@ export function NotificationWatchers() {
   const push = useNotifications((s) => s.push);
   const hydrate = useNotifications((s) => s.hydrate);
   const userId = useAuth((s) => s.session?.user.id);
-  const displayName = useAuth((s) => s.session?.user.displayName ?? "there");
+  const displayName = useAuth((s) => s.session?.user.displayName);
   const wasConnected = useRef(false);
   const everConnected = useRef(false);
 
@@ -31,8 +32,10 @@ export function NotificationWatchers() {
     push(
       {
         level: "success",
-        title: `Welcome back, ${displayName.split(" ")[0]}`,
-        body: "Your OpenNAS desktop is ready.",
+        title: displayName
+          ? tr("ui.notify.welcomeBackName", { name: displayName.split(" ")[0] ?? displayName })
+          : tr("ui.notify.welcomeBack"),
+        body: tr("ui.notify.welcomeBody"),
         appId: "dashboard",
       },
       "welcome",
@@ -44,11 +47,11 @@ export function NotificationWatchers() {
   useEffect(() => {
     if (!latest) return;
     if (latest.cpu.total >= 92) {
-      push({ level: "warning", title: "High CPU load", body: `CPU at ${Math.round(latest.cpu.total)}%`, appId: "task-manager" }, "cpu-high");
+      push({ level: "warning", title: tr("ui.notify.cpuHigh"), body: tr("ui.notify.cpuHighBody", { percent: Math.round(latest.cpu.total) }), appId: "task-manager" }, "cpu-high");
     }
     const memPct = (latest.memory.usedBytes / latest.memory.totalBytes) * 100;
     if (memPct >= 92) {
-      push({ level: "warning", title: "Memory almost full", body: `${Math.round(memPct)}% of RAM in use`, appId: "task-manager" }, "mem-high");
+      push({ level: "warning", title: tr("ui.notify.memHigh"), body: tr("ui.notify.memHighBody", { percent: Math.round(memPct) }), appId: "task-manager" }, "mem-high");
     }
   }, [latest, push]);
 
@@ -56,13 +59,13 @@ export function NotificationWatchers() {
   useEffect(() => {
     if (connected) {
       if (everConnected.current && !wasConnected.current) {
-        push({ level: "success", title: "Reconnected", body: "Live telemetry restored." }, "ws-reconnect");
+        push({ level: "success", title: tr("ui.notify.reconnected"), body: tr("ui.notify.reconnectedBody") }, "ws-reconnect");
       }
       wasConnected.current = true;
       everConnected.current = true;
     } else if (everConnected.current && wasConnected.current) {
       wasConnected.current = false;
-      push({ level: "warning", title: "Connection lost", body: "Trying to reconnect to the server..." }, "ws-lost");
+      push({ level: "warning", title: tr("ui.notify.connectionLost"), body: tr("ui.notify.connectionLostBody") }, "ws-lost");
     }
   }, [connected, push]);
 
@@ -78,8 +81,8 @@ export function NotificationWatchers() {
             push(
               {
                 level: d.usePercent >= 96 ? "critical" : "warning",
-                title: `Volume ${d.mount} is ${Math.round(d.usePercent)}% full`,
-                body: `${formatBytes(d.sizeBytes - d.usedBytes)} free of ${formatBytes(d.sizeBytes)}`,
+                title: tr("ui.notify.volumeFull", { mount: d.mount, percent: Math.round(d.usePercent) }),
+                body: tr("ui.notify.volumeFullBody", { free: formatBytes(d.sizeBytes - d.usedBytes), total: formatBytes(d.sizeBytes) }),
                 appId: "dashboard",
               },
               `disk-${d.mount}`,

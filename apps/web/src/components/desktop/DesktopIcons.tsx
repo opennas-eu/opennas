@@ -3,6 +3,7 @@ import { clsx } from "clsx";
 import { AppIcon } from "../ui/Icon.tsx";
 import { useApps } from "../../store/apps.ts";
 import { useWindows } from "../../store/windows.ts";
+import { useT } from "../../i18n/index.ts";
 import { TASKBAR_HEIGHT } from "../../store/windows.ts";
 
 /** Clickable app shortcuts laid out down the left edge, DSM-style. */
@@ -27,12 +28,13 @@ export function DesktopIcons() {
 }
 
 function DesktopIcon({ app, onOpen }: { app: AppManifest; onOpen: () => void }) {
+  const t = useT();
   return (
     <button
       onDoubleClick={onOpen}
       onKeyDown={(e) => e.key === "Enter" && onOpen()}
       className="pointer-events-auto group flex w-20 flex-col items-center gap-1.5 rounded-lg p-2 text-center transition-colors hover:bg-white/10 focus-visible:bg-white/10 focus-visible:outline-none"
-      title={`${app.name} - double-click to open`}
+      title={t("ui.desktop.iconTitle", { name: app.name })}
     >
       <span
         className={clsx(

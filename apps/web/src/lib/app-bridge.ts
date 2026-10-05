@@ -10,7 +10,9 @@ import type {
   ScheduledTasksResponse,
 } from "@opennas/shared";
 import { api, apiUrl } from "./api.ts";
+import { tr } from "../i18n/index.ts";
 import { asBlob, lastSegment } from "./blob-util.ts";
+import { randomToken } from "./frame-token.ts";
 import { useNotifications } from "../store/notifications.ts";
 import { useAuth } from "../store/auth.ts";
 import { confirmDialog, promptDialog } from "../store/dialogs.ts";
@@ -30,6 +32,12 @@ interface AppReg {
   manifest: AppManifest;
   /** The app iframe's window - the identity we trust messages from. */
   source: Window;
+  /**
+   * The token this frame was loaded with (see `frame-token.ts`). The window
+   * alone isn't enough: it survives navigation, so a page the frame is sent to
+   * would post from the same window. Only the document we loaded knows this.
+   */
+  frameToken: string;
   onSetTitle?: (title: string) => void;
   onClose?: () => void;
   /** Taskbar badge count, or null to clear it. */
@@ -82,24 +90,28 @@ async function handleMessage(e: MessageEvent): Promise<void> {
     id?: number;
     type?: string;
     payload?: Record<string, unknown>;
-    beforeCloseReply?: number;
+    beforeCloseReply?: string;
     allow?: boolean;
+    frame?: string;
   } | null;
   if (!d || d.__opennas !== PROTOCOL) return;
   const source = e.source as Window | null;
   if (!source) return;
+  const reg = apps.get(source);
+  if (!reg) return; // unknown / closed app - ignore silently
+  // Same window, different document: the frame was navigated away from the app
+  // we loaded. Whatever is there now didn't get the app's grants.
+  if (typeof d.frame !== "string" || d.frame !== reg.frameToken) return;
 
   // An answer to "may I close you?" - only honoured from the window that was
   // asked, so one app cannot answer for another.
-  if (typeof d.beforeCloseReply === "number") {
-    if (!apps.has(source)) return;
-    closeWaiters.get(d.beforeCloseReply)?.(d.allow !== false);
+  if (typeof d.beforeCloseReply === "string") {
+    const waiter = closeWaiters.get(d.beforeCloseReply);
+    if (waiter && waiter.source === source) waiter.resolve(d.allow !== false);
     return;
   }
 
   if (typeof d.id !== "number" || typeof d.type !== "string") return;
-  const reg = apps.get(source);
-  if (!reg) return; // unknown / closed app - ignore silently
 
   try {
     const result = await service(reg, d.type, d.payload ?? {}, d.id);
@@ -237,8 +249,10 @@ async function downloadBlob(
  * Hand a file to the browser to save.
  *
  * Done here rather than by giving the app a URL, because the app's iframe is
- * sandboxed without `allow-downloads` - and loosening that so an app could
- * start its own downloads would let it start ones the user didn't ask for.
+ * sandboxed without `allow-downloads` (see AppFrame) - and loosening that so an
+ * app could start its own downloads would let it start ones the user didn't
+ * ask for. A download through here is always one the app asked for by name,
+ * of a file it was already allowed to read.
  */
 function saveToDisk(blob: Blob, filename: string): void {
   const url = URL.createObjectURL(blob);
@@ -505,7 +519,7 @@ async function service(
       await confirmDialog({
         title: reg.manifest.name,
         message: String(p.message ?? "").slice(0, 2000),
-        confirmLabel: "OK",
+        confirmLabel: tr("common.ok"),
         cancelLabel: "",
       });
       return null;
@@ -514,8 +528,8 @@ async function service(
       return await confirmDialog({
         title: typeof p.title === "string" && p.title ? String(p.title).slice(0, 120) : reg.manifest.name,
         message: String(p.message ?? "").slice(0, 2000),
-        confirmLabel: typeof p.confirmLabel === "string" ? p.confirmLabel.slice(0, 40) : "OK",
-        cancelLabel: typeof p.cancelLabel === "string" ? p.cancelLabel.slice(0, 40) : "Cancel",
+        confirmLabel: typeof p.confirmLabel === "string" ? p.confirmLabel.slice(0, 40) : tr("common.ok"),
+        cancelLabel: typeof p.cancelLabel === "string" ? p.cancelLabel.slice(0, 40) : tr("common.cancel"),
         danger: p.danger === true,
       });
     }
@@ -601,23 +615,28 @@ export function askBeforeClose(source: Window, timeoutMs = 1500): Promise<boolea
   const reg = apps.get(source);
   if (!reg?.guardsClose) return Promise.resolve(true);
 
-  const requestId = ++closeRequestId;
+  // Random rather than a counter, and remembered alongside the window it was
+  // sent to: a reply is only honoured from that window, with that id.
+  const requestId = randomToken();
   return new Promise((resolve) => {
     const timer = window.setTimeout(() => {
       closeWaiters.delete(requestId);
       resolve(true);
     }, timeoutMs);
-    closeWaiters.set(requestId, (allow) => {
-      window.clearTimeout(timer);
-      closeWaiters.delete(requestId);
-      resolve(allow);
+    closeWaiters.set(requestId, {
+      source,
+      resolve: (allow) => {
+        window.clearTimeout(timer);
+        closeWaiters.delete(requestId);
+        resolve(allow);
+      },
     });
     source.postMessage({ __opennas: PROTOCOL, event: "beforeClose", payload: { requestId } }, "*");
   });
 }
 
-let closeRequestId = 0;
-const closeWaiters = new Map<number, (allow: boolean) => void>();
+/** Outstanding "may I close you?" questions, by request id. */
+const closeWaiters = new Map<string, { source: Window; resolve: (allow: boolean) => void }>();
 
 /**
  * Windows whose app asked to be consulted before closing.

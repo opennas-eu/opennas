@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import * as client from "openid-client";
 import { config } from "../config.js";
 import { putOidcState, takeOidcState } from "../db/oidc.js";
@@ -17,8 +18,32 @@ async function getConfig(): Promise<client.Configuration> {
   return discovered;
 }
 
-/** Begin login: returns the IdP authorization URL and persists PKCE state. */
-export async function beginLogin(): Promise<string> {
+/**
+ * What the browser that started a login keeps, to prove it is the one finishing
+ * it: a hash of the `state`, in a signed, httpOnly cookie (see auth/routes.ts).
+ *
+ * Without it the state is only checked to *exist*, and anyone can start a login,
+ * stop at the IdP's redirect and hand the callback URL - carrying their own code
+ * - to someone else's browser, which would then be signed in as the attacker's
+ * account (login CSRF), uploading into a NAS account the attacker can read.
+ */
+export function oidcStateBinding(state: string): string {
+  return createHash("sha256").update(`opennas-oidc-state:${state}`).digest("base64url");
+}
+
+/** Whether a binding cookie's value belongs to this `state`. Constant-time. */
+export function oidcStateMatches(binding: string | null | undefined, state: string | null): boolean {
+  if (!binding || !state) return false;
+  const want = Buffer.from(oidcStateBinding(state));
+  const got = Buffer.from(binding);
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+/**
+ * Begin login: returns the IdP authorization URL, persists PKCE state, and
+ * returns the state too so the caller can bind it to the browser.
+ */
+export async function beginLogin(): Promise<{ url: string; state: string }> {
   const cfg = await getConfig();
   const codeVerifier = client.randomPKCECodeVerifier();
   const codeChallenge = await client.calculatePKCECodeChallenge(codeVerifier);
@@ -35,7 +60,7 @@ export async function beginLogin(): Promise<string> {
     state,
     nonce,
   });
-  return url.href;
+  return { url: url.href, state };
 }
 
 export interface OidcClaims {

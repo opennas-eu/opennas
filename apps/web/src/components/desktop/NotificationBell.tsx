@@ -5,6 +5,7 @@ import { useNotifications, type NotificationLevel } from "../../store/notificati
 import { useApps } from "../../store/apps.ts";
 import { useWindows } from "../../store/windows.ts";
 import { formatRelative } from "../../lib/format.ts";
+import { useT } from "../../i18n/index.ts";
 
 const LEVEL_ICON: Record<NotificationLevel, React.ReactNode> = {
   info: <Info size={16} className="text-brand-500" />,
@@ -14,6 +15,7 @@ const LEVEL_ICON: Record<NotificationLevel, React.ReactNode> = {
 };
 
 export function NotificationBell() {
+  const t = useT();
   const items = useNotifications((s) => s.items);
   const markAllRead = useNotifications((s) => s.markAllRead);
   const remove = useNotifications((s) => s.remove);
@@ -45,8 +47,8 @@ export function NotificationBell() {
       <button
         onClick={toggle}
         className={clsx("relative grid h-9 w-9 place-items-center rounded-lg transition-colors", open ? "bg-white/20" : "hover:bg-white/10")}
-        title="Notifications"
-        aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`}
+        title={t("desktop.notifications")}
+        aria-label={unread ? t("ui.notifications.unreadLabel", { count: unread }) : t("desktop.notifications")}
       >
         <Bell size={18} />
         {unread > 0 && (
@@ -59,10 +61,10 @@ export function NotificationBell() {
       {open && (
         <div className="animate-pop absolute right-0 top-11 w-80 overflow-hidden rounded-xl bg-white text-ink shadow-2xl ring-1 ring-black/5">
           <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2.5">
-            <span className="text-sm font-semibold">Notifications</span>
+            <span className="text-sm font-semibold">{t("desktop.notifications")}</span>
             {items.length > 0 && (
               <button onClick={clear} className="flex items-center gap-1 text-xs text-ink-faint hover:text-ink">
-                <CheckCheck size={13} /> Clear all
+                <CheckCheck size={13} /> {t("ui.notifications.clearAll")}
               </button>
             )}
           </div>
@@ -71,7 +73,7 @@ export function NotificationBell() {
             {items.length === 0 ? (
               <div className="flex flex-col items-center gap-2 px-4 py-10 text-center text-sm text-ink-faint">
                 <Bell size={22} className="text-slate-300" />
-                You're all caught up.
+                {t("ui.notifications.empty")}
               </div>
             ) : (
               items.map((n) => {
@@ -100,7 +102,7 @@ export function NotificationBell() {
                     <button
                       onClick={(e) => { e.stopPropagation(); remove(n.id); }}
                       className="grid h-6 w-6 shrink-0 place-items-center rounded text-slate-300 opacity-0 transition hover:bg-slate-200 hover:text-ink-soft group-hover:opacity-100"
-                      aria-label="Dismiss"
+                      aria-label={t("ui.notifications.dismiss")}
                     >
                       <X size={13} />
                     </button>

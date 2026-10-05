@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { mkdir } from "node:fs/promises";
 import type { FastifyBaseLogger } from "fastify";
 import { config } from "../config.js";
 
@@ -17,7 +18,37 @@ export function linuxMode(): boolean {
   return config.systemMode === "linux";
 }
 
-const SAFE_NAME = /^[a-zA-Z0-9_.-]+$/;
+const SAFE_NAME = /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,31}$/;
+
+/**
+ * System accounts and groups OpenNAS must never create, change or delete.
+ *
+ * Mirrors the deny list in `opennas-sysctl`, which is what actually enforces
+ * it - this copy exists so the API can refuse up front with a clear message,
+ * rather than creating an OpenNAS group called `wheel` that the helper then
+ * (correctly) refuses to mirror. Before both existed, mirroring that group
+ * *reconciled* the real `wheel`, removing the administrators from it.
+ */
+const RESERVED_ACCOUNT_NAMES = new Set(
+  (
+    "root bin daemon adm lp sync shutdown halt mail news uucp operator man postmaster cron crontab ftp " +
+    "sshd at squid xfs games cyrus vpopmail ntp smmsp guest nobody nogroup nfsnobody wheel sudo " +
+    "staff sys tty disk mem kmem floppy audio cdrom cdrw dialout tape video netdev kvm input render sgx " +
+    "shadow utmp users lock readproc abuild ping docker libvirt qemu opennas nginx samba avahi messagebus " +
+    "dbus chrony polkitd www-data plugdev usb console wsdd smartd utmpx systemd-journal netatalk rpc " +
+    "rpcuser statd postfix dovecot redis dhcpcd tss uuidd sasl tcpdump"
+  ).split(" "),
+);
+
+/** True for names that belong to the operating system rather than to OpenNAS. */
+export function isReservedAccountName(name: string): boolean {
+  return RESERVED_ACCOUNT_NAMES.has(name.toLowerCase());
+}
+
+/** A name the system-account helpers will accept: safe characters, not reserved. */
+export function isManageableAccountName(name: string): boolean {
+  return SAFE_NAME.test(name) && !isReservedAccountName(name);
+}
 
 interface RunResult {
   ok: boolean;
@@ -68,21 +99,51 @@ async function tryRun(log: FastifyBaseLogger, cmd: string, args: string[], input
 
 /**
  * Run a privileged command. The backend runs as the unprivileged `opennas` user;
- * `doas` (scoped in /etc/doas.d/opennas.conf to exactly these tools) elevates it.
+ * `doas` (scoped in /etc/doas.d/opennas.conf to the OpenNAS helpers) elevates it.
  */
 function priv(log: FastifyBaseLogger, cmd: string, args: string[], input?: string): Promise<boolean> {
   return tryRun(log, "doas", [cmd, ...args], input);
 }
 
-/** Reload the file-sharing daemons so freshly-written configs take effect. */
+const SYSCTL = "/usr/lib/opennas/opennas-sysctl";
+const STORAGE = "/usr/lib/opennas/opennas-storage";
+const FIREWALL = config.firewallHelper;
+
+/**
+ * Install the generated share configs and reload the file-sharing daemons.
+ *
+ * smb.conf and /etc/exports are root-owned: the backend only writes its copies
+ * into the data dir (`generated/`), and the helper checks them - share paths
+ * inside the share roots, no `include`, no `*exec`, no export of anything else -
+ * before putting them in place and telling Samba, NFS and netatalk to re-read.
+ */
 export async function reloadFileServices(log: FastifyBaseLogger): Promise<void> {
   if (!linuxMode()) return;
-  // Samba: re-read smb.conf without dropping client connections.
-  await priv(log, "smbcontrol", ["all", "reload-config"]);
-  // NFS: re-export everything in /etc/exports.
-  await priv(log, "exportfs", ["-ra"]);
-  // AFP/netatalk: reload (no-op if not installed/running).
-  await priv(log, "rc-service", ["netatalk", "reload"]);
+  await priv(log, SYSCTL, ["share-apply"]);
+}
+
+/**
+ * Create a share's directory.
+ *
+ * On the appliance the share roots (and every volume's mount directory) are
+ * root's, so the service account cannot swap a share directory for a symlink
+ * after `share-apply` has checked it. The directory is made by the helper,
+ * owned by the service account, so everything *inside* it works as before.
+ * In demo mode there is no helper and no root: it is made directly under the
+ * data dir. `volume` is a volume label, or empty for the default share root.
+ */
+export async function createShareDir(
+  log: FastifyBaseLogger,
+  share: { name: string; volume?: string | null },
+  path: string,
+): Promise<boolean> {
+  if (!linuxMode()) {
+    await mkdir(path, { recursive: true });
+    return true;
+  }
+  const args = ["share-dir", "create", share.name];
+  if (share.volume) args.push(share.volume);
+  return priv(log, SYSCTL, args);
 }
 
 /** OpenRC service unit for each OpenNAS file-sharing service. */
@@ -110,11 +171,11 @@ export async function applyServiceStates(
     if (enabled === undefined) continue;
     const unit = FILE_SERVICE_UNIT[key];
     if (enabled) {
-      await priv(log, "rc-update", ["add", unit]);
-      await priv(log, "rc-service", [unit, "start"]);
+      await priv(log, SYSCTL, ["service", unit, "enable"]);
+      await priv(log, SYSCTL, ["service", unit, "start"]);
     } else {
-      await priv(log, "rc-service", [unit, "stop"]);
-      await priv(log, "rc-update", ["del", unit]);
+      await priv(log, SYSCTL, ["service", unit, "stop"]);
+      await priv(log, SYSCTL, ["service", unit, "disable"]);
     }
   }
 }
@@ -127,18 +188,15 @@ export async function applyServiceStates(
  */
 export async function syncShareUser(log: FastifyBaseLogger, username: string, password: string): Promise<void> {
   if (!linuxMode()) return;
-  if (!SAFE_NAME.test(username)) {
-    log.warn({ username }, "refusing to sync share user with unsafe name");
+  if (!isManageableAccountName(username)) {
+    log.warn({ username }, "refusing to sync share user with an unsafe or reserved name");
     return;
   }
-  // Create a locked, login-less system user if it doesn't exist yet.
-  const exists = await run("id", [username]);
-  if (!exists.ok) {
-    await priv(log, "adduser", ["-S", "-D", "-H", "-s", "/sbin/nologin", username]);
-  }
+  // Create a locked, login-less share account if it doesn't exist yet. The
+  // helper refuses names that are someone's real account.
+  if (!(await priv(log, SYSCTL, ["user-add", username]))) return;
   // Set + enable the Samba password (smbpasswd reads "new\nconfirm\n" on stdin).
-  await priv(log, "smbpasswd", ["-s", "-a", username], `${password}\n${password}\n`);
-  await priv(log, "smbpasswd", ["-e", username]);
+  await priv(log, SYSCTL, ["user-passwd", username], `${password}\n${password}\n`);
 }
 
 /**
@@ -155,43 +213,35 @@ export async function syncShareGroup(
   usernames: string[],
 ): Promise<void> {
   if (!linuxMode()) return;
-  if (!SAFE_NAME.test(groupName)) {
-    log.warn({ groupName }, "refusing to sync share group with unsafe name");
+  if (!isManageableAccountName(groupName)) {
+    log.warn({ groupName }, "refusing to sync share group with an unsafe or reserved name");
     return;
   }
-  const exists = await run("getent", ["group", groupName]);
-  if (!exists.ok) await priv(log, "addgroup", ["-S", groupName]);
-
-  // Current members, so this converges instead of only ever growing.
-  const current = new Set<string>();
-  const entry = await runCapture("getent", ["group", groupName]);
-  const members = entry.split(":")[3]?.trim();
-  if (members) for (const m of members.split(",")) if (m) current.add(m);
-
-  const wanted = new Set(usernames.filter((u) => SAFE_NAME.test(u)));
-  for (const user of wanted) if (!current.has(user)) await priv(log, "addgroup", [user, groupName]);
-  for (const user of current) if (!wanted.has(user)) await priv(log, "delgroup", [user, groupName]);
+  // The helper creates the group if needed and reconciles its members, so this
+  // converges instead of only ever growing - but only over share accounts, and
+  // only for a group that holds nothing else.
+  const wanted = [...new Set(usernames.filter((u) => isManageableAccountName(u)))];
+  await priv(log, SYSCTL, ["group-sync", groupName, ...wanted]);
 }
 
 /** Remove the system group behind a deleted OpenNAS group. */
 export async function removeShareGroup(log: FastifyBaseLogger, groupName: string): Promise<void> {
   if (!linuxMode()) return;
-  if (!SAFE_NAME.test(groupName)) return;
-  await priv(log, "delgroup", [groupName]);
+  if (!isManageableAccountName(groupName)) return;
+  await priv(log, SYSCTL, ["group-del", groupName]);
 }
 
 /** Remove the Samba + system account for a deleted OpenNAS user. */
 export async function removeShareUser(log: FastifyBaseLogger, username: string): Promise<void> {
   if (!linuxMode()) return;
-  if (!SAFE_NAME.test(username)) return;
-  await priv(log, "smbpasswd", ["-x", username]);
-  await priv(log, "deluser", [username]);
+  if (!isManageableAccountName(username)) return;
+  await priv(log, SYSCTL, ["user-del", username]);
 }
 
 /** Reload the web reverse proxy (nginx) - e.g. after replacing the TLS cert. */
 export async function reloadWebProxy(log: FastifyBaseLogger): Promise<void> {
   if (!linuxMode()) return;
-  await priv(log, "rc-service", ["nginx", "reload"]);
+  await priv(log, SYSCTL, ["service", "nginx", "reload"]);
 }
 
 /** Reboot or power off the whole NAS. */
@@ -200,7 +250,8 @@ export async function powerAction(log: FastifyBaseLogger, action: "reboot" | "po
     log.warn({ action }, "power action requested in demo mode - ignored");
     return false;
   }
-  // Give the HTTP response a moment to flush before the box goes down.
+  // Give the HTTP response a moment to flush before the box goes down. The doas
+  // rule for these takes no arguments, so this is all they can ever do.
   setTimeout(() => void priv(log, action, []), 800);
   return true;
 }
@@ -254,10 +305,6 @@ export async function expandDisk(
   return { ok: true };
 }
 
-const SYSCTL = "/usr/lib/opennas/opennas-sysctl";
-const STORAGE = "/usr/lib/opennas/opennas-storage";
-const FIREWALL = config.firewallHelper;
-
 /** Run a privileged opennas helper and return success + last error line. */
 async function helper(log: FastifyBaseLogger, bin: string, args: string[]): Promise<{ ok: boolean; error?: string }> {
   if (!linuxMode()) {
@@ -273,7 +320,7 @@ async function helper(log: FastifyBaseLogger, bin: string, args: string[]): Prom
 }
 
 /** Start the Docker daemon (linux mode) so the Container manager can reach it. */
-export const startDockerDaemon = (log: FastifyBaseLogger) => helper(log, "rc-service", ["docker", "start"]);
+export const startDockerDaemon = (log: FastifyBaseLogger) => helper(log, SYSCTL, ["service", "docker", "start"]);
 
 /** Enable/disable + start/stop the SSH daemon (linux mode). */
 export const setSshService = (log: FastifyBaseLogger, enabled: boolean) =>

@@ -2,7 +2,7 @@
 # Privileged updater for OpenNAS. Invoked through doas by the unprivileged
 # backend, which allow-lists this exact path.
 #
-#   opennas-update apply <bundle.tar.gz> <bundle.sig>
+#   opennas-update apply [--allow-downgrade] <bundle.tar.gz> <bundle.sig>
 #   opennas-update rollback
 #   opennas-update status
 #
@@ -28,32 +28,239 @@
 # It has to restart the service that started it. Without breaking away from that
 # process group, restarting the backend would kill the updater partway through -
 # most likely with the tree half-swapped.
+#
+# ## Why the bundle is copied first
+#
+# The bundle and its signature sit in the backend's data dir, where the backend
+# can rewrite them at any moment. Verifying that file and then unpacking it
+# would leave a window in which a verified bundle becomes a different one. So
+# both are copied into a directory only root can write, and everything after
+# that - verify, unpack, version check - looks only at the copy.
+#
+# ## Why it refuses older versions
+#
+# An old release is still validly signed. Without this, anyone who could reach
+# the helper could "update" a machine to a build with a bug fixed long ago.
+# `--allow-downgrade` exists for a person at the console; the backend never
+# passes it.
+#
+# ## Why the state directory is entered, not written by path
+#
+# The state directory sits in /var/lib/opennas, which belongs to the service
+# account, so the account can replace it - or the status file inside it - with a
+# symlink, and have root write wherever it points. So the directory is checked
+# to be a real, root-owned one, the script `cd`s into it, and every write is
+# relative to that directory and done by temp-file-and-rename.
 set -eu
+export LC_ALL=C
 
 PREFIX=/usr/lib/opennas
 NEW="${PREFIX}.new"
 OLD="${PREFIX}.old"
 KEY="/etc/opennas/update-key.pub"
 STATE_DIR=/var/lib/opennas/update
-STATUS="$STATE_DIR/status"
-LOG="$STATE_DIR/update.log"
+# Inside it: `status` (read back by the backend) and `update.log`. Both are
+# only ever opened relative to the directory once it has been entered.
 # How long to wait for the new version to answer before giving up on it.
 HEALTH_TIMEOUT=90
 HEALTH_URL="http://127.0.0.1:4174/api/health"
+# Prefixed to every system path the updater installs service files into. Empty
+# on a real machine; only the test sandbox sets it, by rewriting a copy.
+SYSROOT=
 
-say() { echo "$(date -Iseconds) $*" >> "$LOG" 2>/dev/null || true; }
+# Messages carry things the caller chose (a bundle path, at least), and they
+# end up in a `|`-separated status line and a log. One line, printable, short.
+clean() { printf '%s' "$*" | tr -d '\000-\037\177|' | cut -c1-300; }
+
+STATE_OK=0
+# Enter the state directory, making sure it is a real directory that only we
+# can write. Anything else in its place - a symlink, a directory the service
+# account made - is removed and replaced.
+enter_state_dir() {
+	[ "$STATE_OK" = 1 ] && return 0
+	_parent="$(cd -P "$(dirname "$STATE_DIR")" 2>/dev/null && pwd -P)" || return 1
+	_want="$_parent/$(basename "$STATE_DIR")"
+	for _try in 1 2 3; do
+		if [ -L "$STATE_DIR" ] || { [ -e "$STATE_DIR" ] && ! [ -O "$STATE_DIR" ]; } \
+			|| { [ -e "$STATE_DIR" ] && [ ! -d "$STATE_DIR" ]; }; then
+			rm -rf "$STATE_DIR"
+		fi
+		mkdir -p "$STATE_DIR" 2>/dev/null || true
+		chmod 0755 "$STATE_DIR" 2>/dev/null || true
+		if cd -P "$STATE_DIR" 2>/dev/null && [ "$(pwd -P)" = "$_want" ] && [ -O . ]; then
+			case "$(ls -ld . | cut -c6,9)" in *w*) ;; *) STATE_OK=1; return 0;; esac
+		fi
+	done
+	return 1
+}
+
+say() {
+	enter_state_dir 2>/dev/null || return 0
+	[ -L update.log ] && rm -f update.log
+	echo "$(date -Iseconds) $(clean "$*")" >> update.log 2>/dev/null || true
+}
 
 set_status() {
-	mkdir -p "$STATE_DIR"
+	enter_state_dir || { echo "the update state directory is not usable" >&2; return 0; }
 	# state|message|timestamp - read back by the backend for the UI.
-	printf '%s|%s|%s\n' "$1" "$2" "$(date -Iseconds)" > "$STATUS"
+	_tmp="$(mktemp ./.status.XXXXXX)"
+	printf '%s|%s|%s\n' "$1" "$(clean "$2")" "$(date -Iseconds)" > "$_tmp"
+	chmod 0644 "$_tmp"
+	mv -f "$_tmp" status
 }
 
 fail() {
 	say "FAILED: $*"
 	set_status failed "$*"
-	echo "$*" >&2
+	clean "$*" >&2; echo >&2
 	exit 1
+}
+
+# Compare two versions the way the backend's compareVersions does (semver
+# ordering; build metadata after `+` ignored; a pre-release sorts below the
+# release). Prints -1, 0 or 1.
+ver_cmp() {
+	awk -v a="$1" -v b="$2" '
+	function num(s) { if (match(s, /^[0-9]+/)) return substr(s, 1, RLENGTH) + 0; return 0 }
+	function parse(v, P,   core, i, n, parts) {
+		sub(/\+.*/, "", v)
+		i = index(v, "-")
+		if (i) { core = substr(v, 1, i - 1); P["pre"] = substr(v, i + 1) } else { core = v; P["pre"] = "" }
+		n = split(core, parts, ".")
+		for (i = 1; i <= 3; i++) P[i] = (i <= n) ? num(parts[i]) : 0
+	}
+	function isnum(s) { return s ~ /^[0-9]+$/ }
+	function cmppre(x, y,   xa, ya, nx, ny, i, m) {
+		nx = split(x, xa, "."); ny = split(y, ya, ".")
+		m = nx > ny ? nx : ny
+		for (i = 1; i <= m; i++) {
+			if (i > nx) return -1
+			if (i > ny) return 1
+			if (isnum(xa[i]) && isnum(ya[i])) {
+				if (xa[i] + 0 != ya[i] + 0) return (xa[i] + 0 < ya[i] + 0) ? -1 : 1
+				continue
+			}
+			if (isnum(xa[i]) != isnum(ya[i])) return isnum(xa[i]) ? -1 : 1
+			if (xa[i] != ya[i]) return (xa[i] < ya[i]) ? -1 : 1
+		}
+		return 0
+	}
+	BEGIN {
+		parse(a, A); parse(b, B)
+		for (i = 1; i <= 3; i++) if (A[i] != B[i]) { r = (A[i] < B[i]) ? -1 : 1; print r; exit }
+		if (A["pre"] == B["pre"]) { print 0; exit }
+		if (A["pre"] == "") { print 1; exit }
+		if (B["pre"] == "") { print -1; exit }
+		print cmppre(A["pre"], B["pre"])
+	}'
+}
+
+# Every file outside the payload that an update replaces, as
+# <source in the payload>|<destination>|<mode>. Backed up before an apply and put
+# back by a rollback - restoring only the tree would leave the old version
+# started by the new version's init script and served by its nginx config. A
+# source of `-` is not installed from the payload but changed in place by
+# migrate_system, and is listed so a rollback puts it back too.
+SERVICE_FILES="service/doas-opennas.conf|/etc/doas.d/opennas.conf|0600
+-|/etc/conf.d/opennas|0644
+service/opennas.openrc|/etc/init.d/opennas|0755
+service/opennas-tls.openrc|/etc/init.d/opennas-tls|0755
+service/opennas-firewall.openrc|/etc/init.d/opennas-firewall|0755
+service/opennas-banner.openrc|/etc/init.d/opennas-banner|0755
+service/nginx-opennas.conf|/etc/nginx/http.d/opennas.conf|0644
+service/opennas-avahi.service|/etc/avahi/services/opennas.service|0644
+opennas-cli|/usr/sbin/opennas|0755"
+
+# backup_service_files <dir> - copy the current service files into <dir>.
+backup_service_files() {
+	_b="$1"
+	mkdir -p "$_b"
+	printf '%s\n' "$SERVICE_FILES" | while IFS='|' read -r _src _dst _mode; do
+		_name="$(printf '%s' "$_dst" | tr '/' '_')"
+		if [ -f "$SYSROOT$_dst" ]; then
+			cp -p "$SYSROOT$_dst" "$_b/$_name"
+		else
+			: > "$_b/$_name.absent"
+		fi
+	done
+}
+
+# restore_service_files <dir> - put back what backup_service_files saved.
+restore_service_files() {
+	_b="$1"
+	[ -d "$_b" ] || return 0
+	printf '%s\n' "$SERVICE_FILES" | while IFS='|' read -r _src _dst _mode; do
+		_name="$(printf '%s' "$_dst" | tr '/' '_')"
+		if [ -f "$_b/$_name" ]; then
+			install -m "$_mode" "$_b/$_name" "$SYSROOT$_dst" 2>/dev/null || say "could not restore $_dst"
+		elif [ -f "$_b/$_name.absent" ]; then
+			rm -f "$SYSROOT$_dst"
+		fi
+	done
+}
+
+# install_doas_policy <file> - replace the OpenNAS doas policy, but only with
+# one doas itself accepts. A policy doas cannot parse locks the service out of
+# every helper - including this one, so not even a rollback could be asked for.
+# On any doubt the old policy stays.
+install_doas_policy() {
+	_new="$1"; _dst="$SYSROOT/etc/doas.d/opennas.conf"
+	[ -d "$SYSROOT/etc/doas.d" ] || { say "no /etc/doas.d; doas policy left alone"; return 0; }
+	command -v doas >/dev/null 2>&1 || { say "doas is not installed; doas policy left alone"; return 0; }
+	_tmp="$(mktemp "$SYSROOT/etc/doas.d/.opennas.conf.XXXXXX")" || return 0
+	if cat "$_new" > "$_tmp" && chmod 0600 "$_tmp" && doas -C "$_tmp" >/dev/null 2>&1; then
+		chown 0:0 "$_tmp" 2>/dev/null || true
+		mv -f "$_tmp" "$_dst"
+		say "doas policy updated"
+	else
+		rm -f "$_tmp"
+		say "the new doas policy did not validate; the old one was kept"
+	fi
+}
+
+# install_service_files - refresh them from the newly installed payload.
+install_service_files() {
+	printf '%s\n' "$SERVICE_FILES" | while IFS='|' read -r _src _dst _mode; do
+		[ "$_src" = "-" ] && continue
+		[ -f "$PREFIX/$_src" ] || continue
+		case "$_dst" in
+			/etc/doas.d/*) install_doas_policy "$PREFIX/$_src" ;;
+			*) install -m "$_mode" "$PREFIX/$_src" "$SYSROOT$_dst" 2>/dev/null || true ;;
+		esac
+	done
+}
+
+# migrate_system - bring a machine installed by an older release up to what the
+# current installer sets up. Idempotent: on a machine that is already there it
+# changes nothing.
+#
+#   - smb.conf and /etc/exports become root's. The service account owning them
+#     was one line away from exporting / with no_root_squash; they are now
+#     installed only by `opennas-sysctl share-apply`, after checking.
+#   - conf.d points the backend's copies of them at its data dir, so it stops
+#     trying to write /etc directly.
+#   - the directories above every share (the data dir, the share roots, each
+#     volume's mount directory) become root's, so the service account can no
+#     longer swap a share directory for a symlink after share-apply checked it.
+#     `opennas-sysctl share-roots` does the work; it is idempotent and refuses
+#     to follow symlinks. Only on the real root: it has fixed paths.
+migrate_system() {
+	for _f in /etc/samba/smb.conf /etc/exports; do
+		if [ -f "$SYSROOT$_f" ] && [ ! -L "$SYSROOT$_f" ]; then
+			chown -h 0:0 "$SYSROOT$_f" 2>/dev/null || true
+			chmod 0644 "$SYSROOT$_f" 2>/dev/null || true
+		fi
+	done
+	_conf="$SYSROOT/etc/conf.d/opennas"
+	if [ -f "$_conf" ] && [ ! -L "$_conf" ]; then
+		sed -i \
+			-e 's#^export OPENNAS_SMB_CONF=/etc/samba/smb\.conf$#export OPENNAS_SMB_CONF=/var/lib/opennas/generated/smb.conf#' \
+			-e 's#^export OPENNAS_NFS_EXPORTS=/etc/exports$#export OPENNAS_NFS_EXPORTS=/var/lib/opennas/generated/exports#' \
+			"$_conf" 2>/dev/null || say "could not update $_conf"
+	fi
+	if [ -x "$PREFIX/opennas-sysctl" ] && [ ! -L "$PREFIX/opennas-sysctl" ]; then
+		"$PREFIX/opennas-sysctl" share-roots >/dev/null 2>&1 || say "could not secure the share roots"
+	fi
 }
 
 # One attempt at the health endpoint, not twenty.
@@ -73,7 +280,7 @@ health_probe() {
 
 verify_bundle() {
 	bundle="$1"; sig="$2"
-	[ -f "$bundle" ] || fail "no such bundle: $bundle"
+	[ -f "$bundle" ] || fail "no such bundle"
 	[ -f "$sig" ] || fail "no signature alongside the bundle"
 	[ -f "$KEY" ] || fail "no update key at $KEY - this install cannot verify updates"
 	command -v openssl >/dev/null 2>&1 || fail "openssl is not installed, so the update cannot be verified"
@@ -103,6 +310,15 @@ do_apply() {
 	[ -f "$NEW/server/index.js" ] || fail "the bundle has no server/index.js - it is not an OpenNAS update"
 	[ -f "$NEW/VERSION" ] || fail "the bundle has no VERSION"
 
+	# Only ever forwards, unless a person explicitly asked otherwise.
+	new_ver="$(head -n1 "$NEW/VERSION" | tr -d '[:space:]')"
+	cur_ver="$(head -n1 "$PREFIX/VERSION" 2>/dev/null | tr -d '[:space:]' || true)"
+	[ -n "$new_ver" ] || fail "the bundle has an empty VERSION"
+	if [ -n "$cur_ver" ] && [ "$ALLOW_DOWNGRADE" != 1 ] && [ "$(ver_cmp "$new_ver" "$cur_ver")" -le 0 ]; then
+		rm -rf "$NEW"
+		fail "refusing to install $new_ver over $cur_ver: it is not newer"
+	fi
+
 	# Carry the native modules across. Moved rather than copied so the swap is
 	# quick and doesn't need twice the disk.
 	for d in $KEEP_DIRS; do
@@ -116,7 +332,7 @@ do_apply() {
 	if ! cmp -s "$PREFIX/package.json" "$NEW/package.json"; then
 		say "dependencies changed; installing"
 		set_status running "Installing dependencies..."
-		( cd "$NEW" && npm install --omit=dev --no-audit --no-fund >>"$LOG" 2>&1 ) ||
+		( cd "$NEW" && npm install --omit=dev --no-audit --no-fund 2>&1 ) ||
 			fail "the new version's dependencies could not be installed"
 	fi
 
@@ -126,7 +342,7 @@ do_apply() {
 	# that would notice is the new version failing to boot. Checking it here
 	# turns that into a refusal with the old version still running, instead of a
 	# swap, a failed start and a ninety-second rollback.
-	if ! ( cd "$NEW" && node -e "require('better-sqlite3')" >>"$LOG" 2>&1 ); then
+	if ! ( cd "$NEW" && node -e "require('better-sqlite3')" 2>&1 ); then
 		fail "the database driver could not be loaded for this machine, so the update was not installed"
 	fi
 
@@ -144,23 +360,15 @@ do_apply() {
 	fi
 	say "swapped in $(cat "$PREFIX/VERSION" 2>/dev/null || echo unknown)"
 
-	# Service files live outside the payload, so they are refreshed separately.
-	for f in opennas.openrc:/etc/init.d/opennas \
-		opennas-tls.openrc:/etc/init.d/opennas-tls \
-		opennas-firewall.openrc:/etc/init.d/opennas-firewall \
-		opennas-banner.openrc:/etc/init.d/opennas-banner; do
-		src="$PREFIX/service/${f%%:*}"; dst="${f#*:}"
-		[ -f "$src" ] && install -m 0755 "$src" "$dst" 2>/dev/null || true
-	done
-	[ -f "$PREFIX/service/nginx-opennas.conf" ] &&
-		install -m 0644 "$PREFIX/service/nginx-opennas.conf" /etc/nginx/http.d/opennas.conf 2>/dev/null || true
-	[ -f "$PREFIX/service/opennas-avahi.service" ] &&
-		install -m 0644 "$PREFIX/service/opennas-avahi.service" /etc/avahi/services/opennas.service 2>/dev/null || true
-	[ -f "$PREFIX/opennas-cli" ] &&
-		install -m 0755 "$PREFIX/opennas-cli" /usr/sbin/opennas 2>/dev/null || true
+	# Service files live outside the payload, so they are refreshed separately -
+	# after saving the current ones with the old tree, so a rollback can put
+	# them back along with it.
+	backup_service_files "$OLD/.service-backup"
+	install_service_files
+	migrate_system
 
-	rc-service opennas restart >>"$LOG" 2>&1 || say "restart command returned non-zero"
-	rc-service nginx reload >>"$LOG" 2>&1 || true
+	rc-service opennas restart 2>&1 || say "restart command returned non-zero"
+	rc-service nginx reload 2>&1 || true
 
 	# Wait for the new version to actually answer. A version that installs but
 	# won't start is the failure this whole dance exists to survive: on a
@@ -197,6 +405,8 @@ do_rollback() {
 		fail "could not restore the previous version"
 	fi
 	rm -rf "$NEW"
+	restore_service_files "$PREFIX/.service-backup"
+	rm -rf "$PREFIX/.service-backup"
 	rc-service opennas restart >/dev/null 2>&1 || true
 	rc-service nginx reload >/dev/null 2>&1 || true
 	set_status rolled_back "$reason"
@@ -204,36 +414,72 @@ do_rollback() {
 	exit 0
 }
 
+ALLOW_DOWNGRADE=0
+
 case "${1:-}" in
 apply)
-	bundle="${2:?usage: opennas-update apply <bundle.tar.gz> <bundle.sig>}"
-	sig="${3:?usage: opennas-update apply <bundle.tar.gz> <bundle.sig>}"
-	mkdir -p "$STATE_DIR"
+	shift
+	if [ "${1:-}" = "--allow-downgrade" ]; then ALLOW_DOWNGRADE=1; shift; fi
+	bundle="${1:?usage: opennas-update apply [--allow-downgrade] <bundle.tar.gz> <bundle.sig>}"
+	sig="${2:?usage: opennas-update apply [--allow-downgrade] <bundle.tar.gz> <bundle.sig>}"
+	enter_state_dir || { echo "the update state directory is not usable" >&2; exit 1; }
+
+	if [ "${OPENNAS_UPDATE_DETACHED:-}" = "1" ]; then
+		# The detached copy: its bundle is already the private one. Clear the
+		# private directory away however this ends.
+		work="$(dirname "$bundle")"
+		case "$work" in "${PREFIX}.stage."*) trap 'rm -rf "$work"' EXIT ;; esac
+		do_apply "$bundle" "$sig"
+		exit 0
+	fi
+
+	# Take private copies before anything looks at them (see the top). The
+	# staging directory sits beside the install, where only root can write.
+	for f in "$bundle" "$sig"; do
+		[ -L "$f" ] && fail "refusing a symlinked update file"
+	done
+	[ -f "$bundle" ] || fail "no such bundle"
+	[ -f "$sig" ] || fail "no signature alongside the bundle"
+	work="$(mktemp -d "${PREFIX}.stage.XXXXXX")" || fail "could not create a private staging directory"
+	chmod 0700 "$work"
+	if ! { cat < "$bundle" > "$work/bundle.tar.gz" && cat < "$sig" > "$work/bundle.sig"; }; then
+		rm -rf "$work"
+		fail "could not copy the update for checking"
+	fi
 
 	# Re-exec from a private copy, detached from whoever called us. Two reasons:
 	# the tree this script lives in is about to be renamed, and the service that
 	# invoked us is about to be restarted - staying attached to either would end
 	# the update halfway.
-	if [ "${OPENNAS_UPDATE_DETACHED:-}" != "1" ]; then
-		self="$(mktemp /tmp/opennas-update.XXXXXX)"
-		cat "$0" > "$self"
-		chmod 0700 "$self"
-		set_status running "Starting..."
-		OPENNAS_UPDATE_DETACHED=1 setsid "$self" apply "$bundle" "$sig" >>"$LOG" 2>&1 &
-		echo "started"
-		exit 0
+	cat "$0" > "$work/opennas-update"
+	chmod 0700 "$work/opennas-update"
+	set_status running "Starting..."
+	if [ "$ALLOW_DOWNGRADE" = 1 ]; then
+		set -- apply --allow-downgrade "$work/bundle.tar.gz" "$work/bundle.sig"
+	else
+		set -- apply "$work/bundle.tar.gz" "$work/bundle.sig"
 	fi
-
-	do_apply "$bundle" "$sig"
+	# Relative: we are inside the state directory, and the log is opened here
+	# rather than by a path the service account could redirect.
+	OPENNAS_UPDATE_DETACHED=1 setsid "$work/opennas-update" "$@" >>update.log 2>&1 &
+	echo "started"
+	exit 0
 	;;
 rollback)
+	enter_state_dir || true
 	do_rollback "Rolled back on request."
 	;;
 status)
-	[ -f "$STATUS" ] && cat "$STATUS" || echo "idle||"
+	# Read from inside the checked directory, never through a symlink: this
+	# output goes straight back to the caller.
+	if enter_state_dir && [ -f status ] && [ ! -L status ]; then
+		head -n1 status
+	else
+		echo "idle||"
+	fi
 	;;
 *)
-	echo "usage: opennas-update {apply <bundle.tar.gz> <bundle.sig>|rollback|status}" >&2
+	echo "usage: opennas-update {apply [--allow-downgrade] <bundle.tar.gz> <bundle.sig>|rollback|status}" >&2
 	exit 1
 	;;
 esac

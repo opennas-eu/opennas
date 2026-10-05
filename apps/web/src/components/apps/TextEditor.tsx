@@ -2,12 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import { clsx } from "clsx";
 import { ArrowUp, File as FileIcon, FolderOpen, RefreshCw, Save } from "lucide-react";
 import type { FileListResponse } from "@opennas/shared";
+import { useT } from "../../i18n/index.ts";
 import { api, apiUrl, ApiRequestError } from "../../lib/api.ts";
 import { useNotifications } from "../../store/notifications.ts";
 import { confirmDialog } from "../../store/dialogs.ts";
 import { Button } from "../ui/controls.tsx";
 
 export function TextEditor() {
+  const t = useT();
   const [path, setPath] = useState("/");
   const [listing, setListing] = useState<FileListResponse | null>(null);
   const [current, setCurrent] = useState<string | null>(null);
@@ -34,22 +36,22 @@ export function TextEditor() {
 
   async function openFile(name: string) {
     if (dirty && !(await confirmDialog({
-      title: "Discard unsaved changes?",
-      message: "Your current edits will be lost.",
-      confirmLabel: "Discard",
+      title: t("app.editor.discardTitle"),
+      message: t("app.editor.discardBody"),
+      confirmLabel: t("app.editor.discard"),
       danger: true,
     }))) return;
     const filePath = path === "/" ? `/${name}` : `${path}/${name}`;
     setLoadingFile(true);
     try {
       const res = await fetch(apiUrl(`/files/raw?path=${encodeURIComponent(filePath)}`), { credentials: "include" });
-      if (!res.ok) throw new Error("Could not open file.");
+      if (!res.ok) throw new Error(t("app.editor.openError"));
       const text = await res.text();
       setContent(text);
       setOriginal(text);
       setCurrent(filePath);
     } catch (err) {
-      push({ level: "warning", title: "Couldn't open file", body: err instanceof Error ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.editor.openFailed"), body: err instanceof Error ? err.message : t("common.failed") });
     } finally {
       setLoadingFile(false);
     }
@@ -61,9 +63,9 @@ export function TextEditor() {
     try {
       await api.put("/files/write", { path: current, content });
       setOriginal(content);
-      push({ level: "success", title: "Saved", body: current });
+      push({ level: "success", title: t("app.editor.saved"), body: current });
     } catch (err) {
-      push({ level: "warning", title: "Save failed", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.editor.saveFailed"), body: err instanceof ApiRequestError ? err.message : t("common.failed") });
     } finally {
       setSaving(false);
     }
@@ -81,11 +83,11 @@ export function TextEditor() {
       {/* File picker */}
       <aside className="flex w-56 shrink-0 flex-col border-r border-slate-200 bg-slate-50/60">
         <div className="flex items-center gap-1 border-b border-slate-200 px-2 py-2">
-          <button onClick={() => parent && loadDir(parent)} disabled={!parent} className="grid h-7 w-7 place-items-center rounded text-ink-soft hover:bg-slate-200 disabled:opacity-40" title="Up">
+          <button onClick={() => parent && loadDir(parent)} disabled={!parent} className="grid h-7 w-7 place-items-center rounded text-ink-soft hover:bg-slate-200 disabled:opacity-40" title={t("app.editor.up")}>
             <ArrowUp size={15} />
           </button>
           <span className="flex-1 truncate text-xs text-ink-faint" title={path}>{path}</span>
-          <button onClick={() => loadDir(path)} className="grid h-7 w-7 place-items-center rounded text-ink-soft hover:bg-slate-200" title="Refresh">
+          <button onClick={() => loadDir(path)} className="grid h-7 w-7 place-items-center rounded text-ink-soft hover:bg-slate-200" title={t("desktop.refresh")}>
             <RefreshCw size={13} />
           </button>
         </div>
@@ -103,7 +105,7 @@ export function TextEditor() {
               <span className="truncate">{e.name}</span>
             </button>
           ))}
-          {listing?.entries.length === 0 && <p className="px-2 py-3 text-xs text-ink-faint">Empty folder.</p>}
+          {listing?.entries.length === 0 && <p className="px-2 py-3 text-xs text-ink-faint">{t("app.editor.emptyFolder")}</p>}
         </div>
       </aside>
 
@@ -111,11 +113,11 @@ export function TextEditor() {
       <div className="flex min-w-0 flex-1 flex-col">
         <div className="flex items-center gap-2 border-b border-slate-200 px-4 py-2">
           <span className="truncate text-sm font-medium text-ink-soft">
-            {current ?? "No file open"}
+            {current ?? t("app.editor.noFile")}
             {dirty && <span className="ml-1 text-amber-500">●</span>}
           </span>
           <Button className="ml-auto h-8 px-3 py-0 text-xs" disabled={!dirty} loading={saving} onClick={save}>
-            <Save size={14} /> Save
+            <Save size={14} /> {t("common.save")}
           </Button>
         </div>
         {current ? (
@@ -125,13 +127,13 @@ export function TextEditor() {
             onKeyDown={onKeyDown}
             spellCheck={false}
             className="opennas-scroll min-h-0 flex-1 resize-none bg-white p-4 font-mono text-sm text-ink outline-none"
-            placeholder="Empty file"
+            placeholder={t("app.editor.emptyFile")}
           />
         ) : (
           <div className="grid flex-1 place-items-center text-center text-sm text-ink-faint">
             <div>
               <FolderOpen size={28} className="mx-auto mb-2 text-slate-300" />
-              {loadingFile ? "Opening..." : "Select a file to edit"}
+              {loadingFile ? t("app.editor.opening") : t("app.editor.selectFile")}
             </div>
           </div>
         )}

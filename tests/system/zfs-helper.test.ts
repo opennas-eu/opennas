@@ -270,7 +270,7 @@ test("status answers rather than failing when ZFS is missing entirely", () => {
 
 test("the helper is shipped and allow-listed like the others", () => {
   const installer = readFileSync(join(repoRoot, "distro", "installer", "opennas-install"), "utf8");
-  const policy = installer.split("doas.d/opennas.conf")[1] ?? "";
+  const policy = readFileSync(join(repoRoot, "packaging", "doas-opennas.conf"), "utf8");
   assert.ok(policy.includes("cmd /usr/lib/opennas/opennas-zfs"), "no doas rule for the ZFS helper");
   const stage = readFileSync(join(repoRoot, "distro", "stage.sh"), "utf8");
   assert.match(stage, /packaging\/opennas-zfs/);

@@ -64,8 +64,7 @@ test("the helpers the release ships are the helpers doas permits", () => {
   // These three lists have to agree or an update installs a helper that doas
   // refuses to run, which fails at the moment it is needed and not before.
   const release = readFileSync(join(packaging, "make-release.sh"), "utf8");
-  const installer = readFileSync(join(repoRoot, "distro", "installer", "opennas-install"), "utf8");
-  const policy = installer.split("doas.d/opennas.conf")[1] ?? "";
+  const policy = readFileSync(join(repoRoot, "packaging", "doas-opennas.conf"), "utf8");
 
   const permitted = [...policy.matchAll(/cmd \/usr\/lib\/opennas\/([\w-]+)/g)].map((m) => m[1]!);
   assert.ok(permitted.length >= 5, `only ${permitted.length} helpers in the doas policy`);
@@ -91,7 +90,13 @@ test("the updater and the release script agree on the payload layout", () => {
   // there by the updater.
   const release = readFileSync(join(packaging, "make-release.sh"), "utf8");
   assert.match(release, /\$STAGE\/opennas\/service/);
-  assert.match(updater, /\$PREFIX\/service\//);
+  // The updater lists them (and backs them up for a rollback) by their path
+  // inside the payload, so every service file the release ships must appear.
+  assert.match(updater, /\$PREFIX\/\$_src/);
+  for (const f of ["opennas.openrc", "opennas-tls.openrc", "opennas-firewall.openrc", "opennas-banner.openrc", "nginx-opennas.conf", "opennas-avahi.service"]) {
+    assert.ok(release.includes(f), `make-release.sh does not ship ${f}`);
+    assert.ok(updater.includes(`service/${f}|`), `the updater does not install service/${f}`);
+  }
 });
 
 test("the release bundle is packed reproducibly", () => {
@@ -130,4 +135,64 @@ test("no packaging script pipes a download straight into a shell", () => {
       `${path.replace(repoRoot, "")} pipes a download into a shell`,
     );
   }
+});
+
+test("the doas policy grants no raw system tool with open-ended arguments", () => {
+  // adduser, smbpasswd, rc-service, smartctl and the rest used to be listed
+  // with any arguments - enough to set root's Samba password, strip wheel or
+  // stop sshd. Everything privileged goes through a helper now; the only bare
+  // commands left take no arguments at all.
+  const policy = readFileSync(join(repoRoot, "packaging", "doas-opennas.conf"), "utf8");
+  const rules = policy.split("\n").filter((l) => l.startsWith("permit"));
+  assert.ok(rules.length >= 6, "could not find the doas rules");
+  for (const rule of rules) {
+    const m = rule.match(/^permit nopass opennas as root cmd (\S+)(.*)$/);
+    assert.ok(m, `unexpected rule shape: ${rule}`);
+    const [, cmd, rest] = m;
+    if (cmd!.startsWith("/usr/lib/opennas/opennas-")) continue;
+    assert.ok(["reboot", "poweroff"].includes(cmd!), `raw tool allowed: ${rule}`);
+    assert.equal(rest!.trim(), "args", `${cmd} is allowed with arguments`);
+  }
+  // The firewall helper - which the backend also uses for ban/unban/bans - is there.
+  assert.ok(rules.some((r) => r.endsWith("cmd /usr/lib/opennas/opennas-firewall")));
+});
+
+test("the share daemon configs stay root-owned on the appliance", () => {
+  const installer = readFileSync(join(repoRoot, "distro", "installer", "opennas-install"), "utf8");
+  assert.doesNotMatch(installer, /chown opennas:opennas \/etc\/samba\/smb\.conf/);
+  assert.doesNotMatch(installer, /chown [^\n]*opennas[^\n]*\/etc\/exports/);
+  assert.match(installer, /OPENNAS_SMB_CONF=\/var\/lib\/opennas\/generated\/smb\.conf/);
+  assert.match(installer, /OPENNAS_NFS_EXPORTS=\/var\/lib\/opennas\/generated\/exports/);
+});
+
+test("the installer never evals a menu built from hardware strings", () => {
+  // A disk's model string is whatever the device reports; under eval it ran as root.
+  const installer = readFileSync(join(repoRoot, "distro", "installer", "opennas-install"), "utf8");
+  const code = installer
+    .split("\n")
+    .filter((l) => !/^\s*#/.test(l))
+    .join("\n");
+  assert.doesNotMatch(code, /\beval\b/);
+});
+
+test("discovery answers over plain HTTP; nothing else on port 80 does", () => {
+  const conf = readFileSync(join(packaging, "nginx-opennas.conf"), "utf8");
+  const http = conf.slice(conf.indexOf("listen 80"), conf.indexOf("listen 443"));
+  assert.match(http, /location = \/api\/discover \{[^}]*proxy_pass http:\/\/127\.0\.0\.1:4174;/);
+  assert.match(http, /location \/ \{\s*return 301 https:\/\/\$host\$request_uri;/);
+  // Exact-match only: no prefix location that would open more of the API.
+  assert.doesNotMatch(http, /location \/api\/ /);
+});
+
+test("the installer, the ISO and update bundles all carry the one doas policy file", () => {
+  const installer = readFileSync(join(repoRoot, "distro", "installer", "opennas-install"), "utf8");
+  const stage = readFileSync(join(repoRoot, "distro", "stage.sh"), "utf8");
+  const release = readFileSync(join(packaging, "make-release.sh"), "utf8");
+  const updater = readFileSync(join(packaging, "opennas-update"), "utf8");
+  assert.match(installer, /install -m 0600 "\$mnt\/usr\/lib\/opennas\/service\/doas-opennas\.conf" "\$mnt\/etc\/doas\.d\/opennas\.conf"/);
+  assert.doesNotMatch(installer, /permit nopass opennas/, "the installer has its own copy of the policy again");
+  assert.match(stage, /packaging\/doas-opennas\.conf" "\$BUILD\/payload\/usr\/lib\/opennas\/service\/doas-opennas\.conf"/);
+  assert.match(release, /packaging\/doas-opennas\.conf" +"\$STAGE\/opennas\/service\/doas-opennas\.conf"/);
+  assert.ok(updater.includes("service/doas-opennas.conf|/etc/doas.d/opennas.conf|0600"));
+  assert.match(updater, /doas -C/);
 });

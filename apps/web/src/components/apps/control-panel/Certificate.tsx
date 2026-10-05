@@ -6,8 +6,10 @@ import { useNotifications } from "../../../store/notifications.ts";
 import { confirmDialog } from "../../../store/dialogs.ts";
 import { Button } from "../../ui/controls.tsx";
 import { AutoCertificate } from "./AutoCertificate.tsx";
+import { useT } from "../../../i18n/index.ts";
 
 export function Certificate() {
+  const t = useT();
   const [info, setInfo] = useState<TlsInfo | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [cert, setCert] = useState("");
@@ -34,9 +36,9 @@ export function Certificate() {
       setInfo(res.tls);
       setCert("");
       setKey("");
-      push({ level: "success", title: "Certificate updated", body: "nginx reloaded with the new certificate." });
+      push({ level: "success", title: t("cp.cert.updated"), body: t("cp.cert.updatedBody") });
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Could not apply the certificate.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.cert.applyFailed"));
     } finally {
       setBusy(null);
     }
@@ -44,18 +46,18 @@ export function Certificate() {
 
   async function regenerate() {
     if (!(await confirmDialog({
-      title: "Generate a new self-signed certificate?",
-      message: "This replaces the current certificate. Browsers will show a warning until you trust the new one.",
-      confirmLabel: "Generate",
+      title: t("cp.cert.regenTitle"),
+      message: t("cp.cert.regenMessage"),
+      confirmLabel: t("cp.cert.generate"),
     }))) return;
     setBusy("self");
     setError(null);
     try {
       const res = await api.post<TlsResponse>("/admin/tls/self-signed");
       setInfo(res.tls);
-      push({ level: "success", title: "Self-signed certificate generated" });
+      push({ level: "success", title: t("cp.cert.generated") });
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Could not regenerate the certificate.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.cert.regenFailed"));
     } finally {
       setBusy(null);
     }
@@ -64,13 +66,13 @@ export function Certificate() {
   return (
     <div>
       <div className="mb-5">
-        <h2 className="text-lg font-semibold text-ink">Certificate</h2>
-        <p className="text-sm text-ink-faint">The TLS certificate the web interface is served with (HTTPS).</p>
+        <h2 className="text-lg font-semibold text-ink">{t("cp.certificate")}</h2>
+        <p className="text-sm text-ink-faint">{t("cp.cert.subtitle")}</p>
       </div>
 
       <div className="mb-6 rounded-xl bg-slate-50 p-5 ring-1 ring-slate-200/70">
         {!loaded ? (
-          <p className="text-sm text-ink-faint">Loading...</p>
+          <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>
         ) : info ? (
           <div className="flex items-start gap-3">
             <span className={`mt-0.5 grid h-10 w-10 shrink-0 place-items-center rounded-xl text-white ${info.selfSigned ? "bg-amber-500" : "bg-emerald-500"}`}>
@@ -78,19 +80,19 @@ export function Certificate() {
             </span>
             <div className="min-w-0 text-sm">
               <div className="font-semibold text-ink">
-                {info.selfSigned ? "Self-signed certificate" : "Custom certificate"}
+                {info.selfSigned ? t("cp.cert.selfSigned") : t("cp.cert.custom")}
               </div>
               <dl className="mt-1.5 grid grid-cols-[7rem_1fr] gap-x-3 gap-y-1 text-ink-faint">
-                <dt>Subject</dt><dd className="truncate text-ink-soft">{info.subject.replace(/\n/g, ", ")}</dd>
-                <dt>Issuer</dt><dd className="truncate text-ink-soft">{info.issuer.replace(/\n/g, ", ")}</dd>
-                {info.altNames && (<><dt>Alt names</dt><dd className="truncate text-ink-soft">{info.altNames}</dd></>)}
-                <dt>Valid until</dt><dd className="text-ink-soft">{new Date(info.validTo).toLocaleString()}</dd>
+                <dt>{t("cp.cert.subject")}</dt><dd className="truncate text-ink-soft">{info.subject.replace(/\n/g, ", ")}</dd>
+                <dt>{t("cp.cert.issuer")}</dt><dd className="truncate text-ink-soft">{info.issuer.replace(/\n/g, ", ")}</dd>
+                {info.altNames && (<><dt>{t("cp.cert.altNames")}</dt><dd className="truncate text-ink-soft">{info.altNames}</dd></>)}
+                <dt>{t("cp.cert.validUntil")}</dt><dd className="text-ink-soft">{new Date(info.validTo).toLocaleString()}</dd>
                 <dt>SHA-256</dt><dd className="truncate font-mono text-xs text-ink-soft">{info.fingerprint}</dd>
               </dl>
             </div>
           </div>
         ) : (
-          <p className="text-sm text-ink-faint">No certificate found yet.</p>
+          <p className="text-sm text-ink-faint">{t("cp.cert.none")}</p>
         )}
       </div>
 
@@ -99,13 +101,13 @@ export function Certificate() {
       </div>
 
       <section className="mb-6">
-        <h3 className="mb-2 text-sm font-semibold text-ink-soft">Install your own certificate</h3>
+        <h3 className="mb-2 text-sm font-semibold text-ink-soft">{t("cp.cert.installOwn")}</h3>
         <p className="mb-3 text-xs text-ink-faint">
-          Paste a PEM certificate (full chain) and its matching private key. nginx reloads automatically.
+          {t("cp.cert.installHint")}
         </p>
         <div className="space-y-3">
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-ink-soft">Certificate (PEM)</span>
+            <span className="mb-1 block text-xs font-medium text-ink-soft">{t("cp.cert.certPem")}</span>
             <textarea
               value={cert}
               onChange={(e) => setCert(e.target.value)}
@@ -116,7 +118,7 @@ export function Certificate() {
             />
           </label>
           <label className="block">
-            <span className="mb-1 block text-xs font-medium text-ink-soft">Private key (PEM)</span>
+            <span className="mb-1 block text-xs font-medium text-ink-soft">{t("cp.cert.keyPem")}</span>
             <textarea
               value={key}
               onChange={(e) => setKey(e.target.value)}
@@ -130,17 +132,16 @@ export function Certificate() {
         {error && <p className="mt-2 text-sm text-rose-600">{error}</p>}
         <div className="mt-3 flex items-center gap-2">
           <Button loading={busy === "apply"} disabled={!cert.trim() || !key.trim()} onClick={apply}>
-            Apply certificate
+            {t("cp.cert.apply")}
           </Button>
           <Button variant="secondary" loading={busy === "self"} onClick={regenerate}>
-            <RefreshCw size={15} /> Regenerate self-signed
+            <RefreshCw size={15} /> {t("cp.cert.regenerate")}
           </Button>
         </div>
       </section>
 
       <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 ring-1 ring-amber-200">
-        After applying a new certificate you may need to reload the page; browsers warn on self-signed
-        certificates until you trust them or install one from a real CA.
+        {t("cp.cert.reloadNote")}
       </p>
     </div>
   );

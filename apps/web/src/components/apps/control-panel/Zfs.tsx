@@ -26,6 +26,7 @@ import { useNotifications } from "../../../store/notifications.ts";
 import { confirmDialog, promptDialog } from "../../../store/dialogs.ts";
 import { formatBytes } from "../../../lib/format.ts";
 import { Button, Input, Select } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
 
 /**
  * ZFS pools, datasets and snapshots.
@@ -44,6 +45,7 @@ import { Button, Input, Select } from "../../ui/controls.tsx";
  * after their disks are already full.
  */
 export function Zfs({ disks, onChanged }: { disks: StorageDisk[]; onChanged: () => Promise<void> }) {
+  const t = useT();
   const [data, setData] = useState<ZfsResponse | null>(null);
   const [layouts, setLayouts] = useState<ZfsLayoutInfo[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
@@ -69,12 +71,12 @@ export function Zfs({ disks, onChanged }: { disks: StorageDisk[]; onChanged: () 
   useEffect(() => {
     const busyPool = data?.pools.some((p) => p.scan !== null);
     if (!busyPool) return;
-    const t = setInterval(() => void load(), 10_000);
-    return () => clearInterval(t);
+    const timer = setInterval(() => void load(), 10_000);
+    return () => clearInterval(timer);
   }, [data, load]);
 
   function fail(err: unknown, title: string) {
-    push({ level: "warning", title, body: err instanceof ApiRequestError ? err.message : "Failed." });
+    push({ level: "warning", title, body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
   }
 
   async function act(key: string, fn: () => Promise<unknown>, success?: string) {
@@ -85,7 +87,7 @@ export function Zfs({ disks, onChanged }: { disks: StorageDisk[]; onChanged: () 
       await load();
       await onChanged();
     } catch (err) {
-      fail(err, "That didn't work");
+      fail(err, t("cp.zfs.actionFailed"));
     } finally {
       setBusy(null);
     }
@@ -101,7 +103,7 @@ export function Zfs({ disks, onChanged }: { disks: StorageDisk[]; onChanged: () 
         </h3>
         <p className="flex items-start gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-ink-faint ring-1 ring-slate-200/70">
           <Info size={13} className="mt-0.5 shrink-0" />
-          <span>{data.status.reason || "ZFS isn't available on this system."}</span>
+          <span>{data.status.reason || t("cp.zfs.unavailable")}</span>
         </p>
       </section>
     );
@@ -121,14 +123,13 @@ export function Zfs({ disks, onChanged }: { disks: StorageDisk[]; onChanged: () 
       </div>
 
       <p className="mb-3 text-xs text-ink-faint">
-        ZFS checksums every block and repairs it from your other disks when it doesn't match - so it catches a file
-        quietly rotting, which ordinary RAID can't.
+        {t("cp.zfs.intro")}
       </p>
 
       {data.importable.length > 0 && (
         <div className="mb-3 rounded-lg bg-brand-50 px-3 py-2 text-xs text-brand-800 ring-1 ring-brand-200">
           <div className="mb-1 font-medium">
-            {data.importable.length} pool{data.importable.length === 1 ? "" : "s"} found on disk but not in use
+            {t("cp.zfs.importable", { count: data.importable.length })}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {data.importable.map((name) => (
@@ -137,9 +138,9 @@ export function Zfs({ disks, onChanged }: { disks: StorageDisk[]; onChanged: () 
                 variant="secondary"
                 className="h-7 px-2 text-xs"
                 loading={busy === `import-${name}`}
-                onClick={() => void act(`import-${name}`, () => api.post("/admin/zfs/import", { name }), `Imported ${name}`)}
+                onClick={() => void act(`import-${name}`, () => api.post("/admin/zfs/import", { name }), t("cp.zfs.imported", { name }))}
               >
-                Import {name}
+                {t("cp.zfs.import", { name })}
               </Button>
             ))}
           </div>
@@ -148,7 +149,7 @@ export function Zfs({ disks, onChanged }: { disks: StorageDisk[]; onChanged: () 
 
       {data.pools.length === 0 ? (
         <p className="mb-3 rounded-lg bg-slate-50 px-3 py-2 text-xs text-ink-faint ring-1 ring-slate-200/70">
-          No pools yet.
+          {t("cp.zfs.noPools")}
         </p>
       ) : (
         <div className="mb-3 space-y-2">
@@ -196,36 +197,35 @@ function PoolCard({
   busy: string | null;
   act: (key: string, fn: () => Promise<unknown>, success?: string) => Promise<void>;
 }) {
+  const t = useT();
   const [showSnaps, setShowSnaps] = useState(false);
   const degraded = pool.health !== "ONLINE";
 
   async function destroy() {
     if (
       !(await confirmDialog({
-        title: `Destroy the pool "${pool.name}"?`,
-        message:
-          `Everything on it is erased - every dataset, every snapshot, every file - and the disks go back to being ` +
-          `unconfigured. There is no undo and no recycle bin for this.`,
-        confirmLabel: "Erase the pool",
+        title: t("cp.zfs.destroyPoolTitle", { name: pool.name }),
+        message: t("cp.zfs.destroyPoolMessage"),
+        confirmLabel: t("cp.zfs.erasePool"),
         danger: true,
       }))
     )
       return;
-    await act(`destroy-${pool.name}`, () => api.del(`/admin/zfs/pools/${pool.name}`), `Destroyed ${pool.name}`);
+    await act(`destroy-${pool.name}`, () => api.del(`/admin/zfs/pools/${pool.name}`), t("cp.zfs.destroyed", { name: pool.name }));
   }
 
   async function newDataset() {
     const name = await promptDialog({
-      title: `New dataset in ${pool.name}`,
-      message: "A dataset is a filesystem of its own inside the pool - it can have its own quota and its own snapshots.",
-      placeholder: "photos",
-      confirmLabel: "Create",
+      title: t("cp.zfs.newDatasetTitle", { pool: pool.name }),
+      message: t("cp.zfs.newDatasetMessage"),
+      placeholder: t("cp.zfs.newDatasetPlaceholder"),
+      confirmLabel: t("common.create"),
     });
     if (!name) return;
     await act(
       `ds-${pool.name}`,
       () => api.post("/admin/zfs/datasets", { name: `${pool.name}/${name.trim()}` }),
-      `Created ${pool.name}/${name.trim()}`,
+      t("cp.zfs.created", { name: `${pool.name}/${name.trim()}` }),
     );
   }
 
@@ -250,8 +250,12 @@ function PoolCard({
             )}
           </div>
           <div className="text-xs text-ink-faint">
-            {formatBytes(pool.allocatedBytes)} of {formatBytes(pool.sizeBytes)} used - {pool.capacityPercent}% -{" "}
-            {pool.mountpoint}
+            {t("cp.zfs.poolUsage", {
+              used: formatBytes(pool.allocatedBytes),
+              total: formatBytes(pool.sizeBytes),
+              percent: pool.capacityPercent,
+              mountpoint: pool.mountpoint,
+            })}
           </div>
         </div>
         <Button
@@ -259,21 +263,21 @@ function PoolCard({
           className="h-8 px-2 text-xs"
           loading={busy === `scrub-${pool.name}`}
           onClick={() =>
-            void act(`scrub-${pool.name}`, () => api.post(`/admin/zfs/pools/${pool.name}/scrub`, {}), "Scrub started")
+            void act(`scrub-${pool.name}`, () => api.post(`/admin/zfs/pools/${pool.name}/scrub`, {}), t("cp.zfs.scrubStarted"))
           }
         >
-          <ShieldCheck size={13} /> Scrub
+          <ShieldCheck size={13} /> {t("cp.zfs.scrub")}
         </Button>
         <Button variant="ghost" className="h-8 px-2 text-xs" onClick={() => setShowSnaps((s) => !s)}>
-          <Camera size={13} /> Snapshots
+          <Camera size={13} /> {t("cp.zfs.snapshots")}
         </Button>
         <Button variant="ghost" className="h-8 px-2 text-xs" onClick={() => void newDataset()}>
-          <Plus size={13} /> Dataset
+          <Plus size={13} /> {t("cp.zfs.dataset")}
         </Button>
         <Button
           variant="ghost"
           className="h-8 px-2 text-rose-600 hover:bg-rose-50"
-          title="Destroy this pool"
+          title={t("cp.zfs.destroyPool")}
           loading={busy === `destroy-${pool.name}`}
           onClick={() => void destroy()}
         >
@@ -306,11 +310,11 @@ function PoolCard({
                     className={`inline-flex items-center gap-1 rounded px-1.5 py-px font-mono text-[10px] ring-1 ${
                       bad || errs > 0 ? "bg-rose-50 text-rose-700 ring-rose-200" : "bg-slate-50 text-ink-faint ring-slate-200"
                     }`}
-                    title={`${m.state} - read ${m.errors.read}, write ${m.errors.write}, checksum ${m.errors.checksum}`}
+                    title={t("cp.zfs.memberErrors", { state: m.state, read: m.errors.read, write: m.errors.write, checksum: m.errors.checksum })}
                   >
                     <HardDrive size={9} />
                     {m.name}
-                    {errs > 0 && <span className="font-semibold">{errs} err</span>}
+                    {errs > 0 && <span className="font-semibold">{t("cp.zfs.errorCount", { count: errs })}</span>}
                   </span>
                 );
               })}
@@ -343,13 +347,13 @@ function DatasetRow({
   busy: string | null;
   act: (key: string, fn: () => Promise<unknown>, success?: string) => Promise<void>;
 }) {
+  const t = useT();
   async function setQuota() {
     const answer = await promptDialog({
-      title: `Quota for ${dataset.name}`,
-      message:
-        "A size in GB, or empty for no limit. The filesystem enforces this one - nothing can write past it.",
+      title: t("cp.zfs.quotaTitle", { name: dataset.name }),
+      message: t("cp.zfs.quotaMessage"),
       placeholder: dataset.quotaBytes > 0 ? String(Math.round(dataset.quotaBytes / 1024 ** 3)) : "",
-      confirmLabel: "Save",
+      confirmLabel: t("common.save"),
     });
     if (answer === null) return;
     const gb = answer.trim() === "" ? null : Number(answer);
@@ -357,16 +361,16 @@ function DatasetRow({
     await act(
       `quota-${dataset.name}`,
       () => api.put("/admin/zfs/datasets/quota", { name: dataset.name, bytes: gb === null ? null : Math.round(gb * 1024 ** 3) }),
-      "Quota saved",
+      t("cp.zfs.quotaSaved"),
     );
   }
 
   async function destroy() {
     if (
       !(await confirmDialog({
-        title: `Destroy "${dataset.name}"?`,
-        message: "Its files and all of its snapshots are erased. There is no undo.",
-        confirmLabel: "Erase",
+        title: t("cp.zfs.destroyDatasetTitle", { name: dataset.name }),
+        message: t("cp.zfs.destroyDatasetMessage"),
+        confirmLabel: t("cp.zfs.erase"),
         danger: true,
       }))
     )
@@ -374,7 +378,7 @@ function DatasetRow({
     await act(
       `dsdel-${dataset.name}`,
       () => api.del(`/admin/zfs/datasets?name=${encodeURIComponent(dataset.name)}`),
-      "Dataset destroyed",
+      t("cp.zfs.datasetDestroyed"),
     );
   }
 
@@ -383,10 +387,10 @@ function DatasetRow({
       <span className="min-w-0 flex-1 truncate font-mono text-ink-soft">{dataset.name}</span>
       <span className="text-ink-faint">
         {formatBytes(dataset.usedBytes)}
-        {dataset.quotaBytes > 0 && ` of ${formatBytes(dataset.quotaBytes)}`}
+        {dataset.quotaBytes > 0 && ` ${t("cp.zfs.ofQuota", { quota: formatBytes(dataset.quotaBytes) })}`}
       </span>
       <Button variant="ghost" className="h-6 px-1.5 text-[11px]" loading={busy === `quota-${dataset.name}`} onClick={() => void setQuota()}>
-        Quota
+        {t("cp.zfs.quota")}
       </Button>
       <Button
         variant="ghost"
@@ -394,7 +398,7 @@ function DatasetRow({
         loading={busy === `dsdel-${dataset.name}`}
         onClick={() => void destroy()}
       >
-        Delete
+        {t("common.delete")}
       </Button>
     </div>
   );
@@ -411,6 +415,7 @@ function Snapshots({
   busy: string | null;
   act: (key: string, fn: () => Promise<unknown>, success?: string) => Promise<void>;
 }) {
+  const t = useT();
   const [snaps, setSnaps] = useState<ZfsSnapshot[] | null>(null);
   const targets = datasets.filter((d) => d !== pool);
 
@@ -435,7 +440,7 @@ function Snapshots({
   if (targets.length === 0) {
     return (
       <p className="mt-2 rounded-lg bg-white px-3 py-2 text-[11px] text-ink-faint ring-1 ring-slate-200/70">
-        Snapshots are taken of a dataset. Create one first.
+        {t("cp.zfs.snapshotsNeedDataset")}
       </p>
     );
   }
@@ -443,7 +448,7 @@ function Snapshots({
   return (
     <div className="mt-2 rounded-lg bg-white p-2.5 ring-1 ring-slate-200/70">
       <div className="mb-1.5 flex flex-wrap items-center gap-2">
-        <span className="text-xs font-medium text-ink-soft">Snapshots</span>
+        <span className="text-xs font-medium text-ink-soft">{t("cp.zfs.snapshots")}</span>
         {targets.map((d) => (
           <Button
             key={d}
@@ -459,7 +464,7 @@ function Snapshots({
                     // A name someone can read six months later, and one that sorts.
                     name: new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-"),
                   }),
-                "Snapshot taken",
+                t("cp.zfs.snapshotTaken"),
               ).then(load)
             }
           >
@@ -468,9 +473,9 @@ function Snapshots({
         ))}
       </div>
       {snaps === null ? (
-        <p className="text-[11px] text-ink-faint">Loading...</p>
+        <p className="text-[11px] text-ink-faint">{t("desktop.loading")}</p>
       ) : snaps.length === 0 ? (
-        <p className="text-[11px] text-ink-faint">None yet. A snapshot costs nothing until the data changes.</p>
+        <p className="text-[11px] text-ink-faint">{t("cp.zfs.noSnapshots")}</p>
       ) : (
         <ul className="space-y-1">
           {snaps.map((s) => (
@@ -484,19 +489,18 @@ function Snapshots({
                 onClick={async () => {
                   if (
                     !(await confirmDialog({
-                      title: `Roll ${s.dataset} back to ${s.snapshot}?`,
-                      message:
-                        "Every change since that snapshot is discarded, and any newer snapshot is destroyed to make room. There is no undo.",
-                      confirmLabel: "Roll back",
+                      title: t("cp.zfs.rollbackTitle", { dataset: s.dataset, snapshot: s.snapshot }),
+                      message: t("cp.zfs.rollbackMessage"),
+                      confirmLabel: t("cp.zfs.rollBack"),
                       danger: true,
                     }))
                   )
                     return;
-                  await act(`rb-${s.name}`, () => api.post("/admin/zfs/snapshots/rollback", { name: s.name }), "Rolled back");
+                  await act(`rb-${s.name}`, () => api.post("/admin/zfs/snapshots/rollback", { name: s.name }), t("cp.zfs.rolledBack"));
                   await load();
                 }}
               >
-                <RotateCcw size={11} /> Roll back
+                <RotateCcw size={11} /> {t("cp.zfs.rollBack")}
               </Button>
               <Button
                 variant="ghost"
@@ -506,7 +510,7 @@ function Snapshots({
                   await load();
                 }}
               >
-                Delete
+                {t("common.delete")}
               </Button>
             </li>
           ))}
@@ -527,6 +531,7 @@ function PoolCreate({
   raidzExpansion: boolean;
   onCreated: () => Promise<void>;
 }) {
+  const t = useT();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("tank");
   const [layout, setLayout] = useState("raidz2");
@@ -548,13 +553,14 @@ function PoolCreate({
     const members = [...selected];
     if (
       !(await confirmDialog({
-        title: `Create "${name}" from ${members.length} disks?`,
+        title: t("cp.zfs.createTitle", { name, count: members.length }),
         message:
-          `This ERASES ${members.map((d) => d.replace("/dev/", "")).join(", ")}. ` +
+          t("cp.zfs.createErases", { disks: members.map((d) => d.replace("/dev/", "")).join(", ") }) +
+          " " +
           (def.faultTolerance === 0
-            ? "This layout has no redundancy - losing any one of these disks loses the whole pool."
-            : `The pool survives ${def.faultTolerance} disk failure${def.faultTolerance === 1 ? "" : "s"}.`),
-        confirmLabel: "Erase & create",
+            ? t("cp.zfs.noRedundancy")
+            : t("cp.zfs.survives", { count: def.faultTolerance })),
+        confirmLabel: t("cp.zfs.eraseAndCreate"),
         danger: true,
       }))
     )
@@ -562,15 +568,15 @@ function PoolCreate({
     setBusy(true);
     try {
       await api.post("/admin/zfs/pools", { name: name.trim(), layout, disks: members });
-      push({ level: "success", title: "Pool created", body: `${name} is ready.` });
+      push({ level: "success", title: t("cp.zfs.poolCreated"), body: t("cp.zfs.poolReady", { name }) });
       setOpen(false);
       setSelected(new Set());
       await onCreated();
     } catch (err) {
       push({
         level: "warning",
-        title: "Couldn't create the pool",
-        body: err instanceof ApiRequestError ? err.message : "Failed.",
+        title: t("cp.zfs.createFailed"),
+        body: err instanceof ApiRequestError ? err.message : t("cp.failed"),
       });
     } finally {
       setBusy(false);
@@ -580,7 +586,7 @@ function PoolCreate({
   if (!open) {
     return (
       <Button variant="secondary" className="h-8 px-3 text-xs" onClick={() => setOpen(true)}>
-        <Plus size={13} /> Create a ZFS pool
+        <Plus size={13} /> {t("cp.zfs.createPool")}
       </Button>
     );
   }
@@ -589,15 +595,15 @@ function PoolCreate({
     <div className="rounded-xl bg-white p-3 ring-1 ring-slate-200">
       <div className="mb-2 grid gap-2 sm:grid-cols-2">
         <div>
-          <label className="mb-1 block text-xs font-medium text-ink-soft">Pool name</label>
+          <label className="mb-1 block text-xs font-medium text-ink-soft">{t("cp.zfs.poolName")}</label>
           <Input value={name} onChange={(e) => setName(e.target.value)} className="h-8 text-xs" placeholder="tank" />
         </div>
         <div>
-          <label className="mb-1 block text-xs font-medium text-ink-soft">Layout</label>
+          <label className="mb-1 block text-xs font-medium text-ink-soft">{t("cp.zfs.layout")}</label>
           <Select value={layout} onChange={(e) => setLayout(e.target.value)} className="h-8 w-full py-0 text-xs">
             {layouts.map((l) => (
               <option key={l.id} value={l.id}>
-                {l.name} - needs {l.minDisks}+
+                {t("cp.zfs.layoutOption", { name: l.name, min: l.minDisks })}
               </option>
             ))}
           </Select>
@@ -615,8 +621,7 @@ function PoolCreate({
         <p className="mb-2 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-[11px] text-amber-900 ring-1 ring-amber-200">
           <AlertTriangle size={12} className="mt-0.5 shrink-0" />
           <span>
-            This version of ZFS can't add a disk to a RAIDZ group later. The pool grows by adding another group of the
-            same shape - so pick the width you want now. A mirror can always take another disk.
+            {t("cp.zfs.raidzWarning")}
           </span>
         </p>
       )}
@@ -648,17 +653,17 @@ function PoolCreate({
       </div>
 
       <p className="mb-2 text-[11px] text-ink-faint">
-        {count} selected
-        {!enough && ` - ${def.name} needs at least ${def.minDisks}`}
-        {enough && usable > 0 && ` - about ${formatBytes(usable)} usable, survives ${def.faultTolerance} failure${def.faultTolerance === 1 ? "" : "s"}`}
+        {t("cp.zfs.selected", { selected: count })}
+        {!enough && ` - ${t("cp.zfs.needsAtLeast", { name: def.name, min: def.minDisks })}`}
+        {enough && usable > 0 && ` - ${t("cp.zfs.usable", { size: formatBytes(usable), count: def.faultTolerance })}`}
       </p>
 
       <div className="flex items-center gap-2">
         <Button className="h-8 px-3 text-xs" disabled={!enough || !name.trim()} loading={busy} onClick={() => void create()}>
-          Create
+          {t("common.create")}
         </Button>
         <Button variant="ghost" className="h-8 px-3 text-xs" onClick={() => setOpen(false)}>
-          Cancel
+          {t("common.cancel")}
         </Button>
       </div>
     </div>

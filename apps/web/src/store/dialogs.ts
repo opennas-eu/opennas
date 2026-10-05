@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { tr } from "../i18n/index.ts";
 
 /**
  * In-app confirm/prompt dialogs - a drop-in, promise-based replacement for the
@@ -73,8 +74,8 @@ export function confirmDialog(options: ConfirmOptions): Promise<boolean> {
       kind: "confirm",
       title: options.title,
       message: options.message,
-      confirmLabel: options.confirmLabel ?? "Confirm",
-      cancelLabel: options.cancelLabel ?? "Cancel",
+      confirmLabel: options.confirmLabel ?? tr("common.confirm"),
+      cancelLabel: options.cancelLabel ?? tr("common.cancel"),
       danger: options.danger ?? false,
       defaultValue: "",
       inputType: "text",
@@ -91,8 +92,8 @@ export function promptDialog(options: PromptOptions): Promise<string | null> {
       kind: "prompt",
       title: options.title,
       message: options.message,
-      confirmLabel: options.confirmLabel ?? "OK",
-      cancelLabel: options.cancelLabel ?? "Cancel",
+      confirmLabel: options.confirmLabel ?? tr("common.ok"),
+      cancelLabel: options.cancelLabel ?? tr("common.cancel"),
       danger: false,
       defaultValue: options.defaultValue ?? "",
       placeholder: options.placeholder,

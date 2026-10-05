@@ -4,6 +4,8 @@ import type { FileEntry } from "@opennas/shared";
 import { api, apiUrl, ApiRequestError } from "../../lib/api.ts";
 import { useNotifications } from "../../store/notifications.ts";
 import { formatBytes } from "../../lib/format.ts";
+import { defuseRenderedMarkup } from "../../lib/safe-markup.ts";
+import { useT } from "../../i18n/index.ts";
 
 type Kind = "image" | "video" | "audio" | "pdf" | "text" | "csv" | "docx" | "none";
 
@@ -62,6 +64,7 @@ export function FilePreview({
   const downloadUrl = apiUrl(`/files/download?path=${encodeURIComponent(path)}`);
   const kind = kindOf(entry);
   const push = useNotifications((s) => s.push);
+  const t = useT();
 
   const [renaming, setRenaming] = useState(false);
   const [nameDraft, setNameDraft] = useState(entry.name);
@@ -93,7 +96,7 @@ export function FilePreview({
       await api.post("/files/rename", { path, newName: nextName });
       onRenamed?.({ ...entry, name: nextName });
     } catch (err) {
-      push({ level: "warning", title: "Rename failed", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.files.renameFailed"), body: err instanceof ApiRequestError ? err.message : t("app.files.failed") });
       setNameDraft(entry.name);
     }
   }
@@ -123,13 +126,13 @@ export function FilePreview({
           <button
             onClick={() => { setNameDraft(entry.name); setRenaming(true); }}
             className="grid h-8 w-8 place-items-center rounded-lg text-white/80 transition hover:bg-white/15 hover:text-white"
-            title="Rename"
+            title={t("app.files.rename")}
           >
             <Pencil size={16} />
           </button>
         )}
         {renaming && (
-          <button onMouseDown={(e) => e.preventDefault()} onClick={() => void commitRename()} className="grid h-8 w-8 place-items-center rounded-lg text-white/80 transition hover:bg-white/15 hover:text-white" title="Save name">
+          <button onMouseDown={(e) => e.preventDefault()} onClick={() => void commitRename()} className="grid h-8 w-8 place-items-center rounded-lg text-white/80 transition hover:bg-white/15 hover:text-white" title={t("app.preview.saveName")}>
             <Check size={18} />
           </button>
         )}
@@ -138,11 +141,11 @@ export function FilePreview({
           target="_blank"
           rel="noopener"
           className="grid h-8 w-8 place-items-center rounded-lg text-white/80 transition hover:bg-white/15 hover:text-white"
-          title="Download"
+          title={t("app.files.download")}
         >
           <Download size={17} />
         </a>
-        <button onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-white/80 transition hover:bg-white/15 hover:text-white" title="Close (Esc)">
+        <button onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-white/80 transition hover:bg-white/15 hover:text-white" title={t("app.preview.close")}>
           <X size={18} />
         </button>
       </div>
@@ -164,11 +167,12 @@ export function FilePreview({
 }
 
 function NavArrow({ side, onClick }: { side: "left" | "right"; onClick: () => void }) {
+  const t = useT();
   return (
     <button
       onClick={onClick}
       className={`absolute top-1/2 z-10 grid h-10 w-10 -translate-y-1/2 place-items-center rounded-full bg-white/10 text-white transition hover:bg-white/25 ${side === "left" ? "left-3" : "right-3"}`}
-      title={side === "left" ? "Previous (←)" : "Next (→)"}
+      title={side === "left" ? t("app.preview.previous") : t("app.preview.next")}
     >
       {side === "left" ? <ChevronLeft size={22} /> : <ChevronRight size={22} />}
     </button>
@@ -189,6 +193,12 @@ function PreviewBody({ kind, entry, path, rawUrl, downloadUrl, writable, startEd
         </div>
       );
     case "pdf":
+      // Deliberately no `sandbox` attribute: a sandboxed frame turns off the
+      // browser's built-in PDF viewer (Chrome refuses outright), which is the
+      // only thing this frame is for. The isolation comes from the response
+      // instead - /files/raw sends a type derived from the extension (so this
+      // is application/pdf, never HTML), `nosniff`, and a CSP `sandbox`
+      // header, and refuses to serve HTML or SVG inline at all.
       return <iframe src={rawUrl} title={entry.name} className="h-full w-full rounded-lg bg-white shadow-2xl" />;
     case "text":
     case "csv":
@@ -201,21 +211,23 @@ function PreviewBody({ kind, entry, path, rawUrl, downloadUrl, writable, startEd
 }
 
 function NoPreview({ downloadUrl }: { downloadUrl: string }) {
+  const t = useT();
   return (
     <div className="rounded-2xl bg-white p-8 text-center shadow-2xl">
       <FileQuestion size={40} className="mx-auto mb-3 text-slate-300" />
-      <p className="text-sm font-medium text-ink">No preview available for this file type.</p>
+      <p className="text-sm font-medium text-ink">{t("app.preview.unsupported")}</p>
       <a href={downloadUrl} target="_blank" rel="noopener" className="mt-3 inline-flex items-center gap-2 rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-500">
-        <Download size={15} /> Download
+        <Download size={15} /> {t("app.files.download")}
       </a>
     </div>
   );
 }
 
 function Spinner() {
+  const t = useT();
   return (
     <div className="flex items-center gap-2 rounded-xl bg-white px-5 py-4 text-sm text-ink-soft shadow-2xl">
-      <Loader2 size={16} className="animate-spin" /> Loading preview...
+      <Loader2 size={16} className="animate-spin" /> {t("app.preview.loading")}
     </div>
   );
 }
@@ -229,16 +241,18 @@ function TextPreview({ path, rawUrl, csv, tsv, writable, startEditing, onSaved }
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
   const push = useNotifications((s) => s.push);
+  const t = useT();
 
   useEffect(() => {
     const ac = new AbortController();
     setText(null);
     setError(null);
     fetch(rawUrl, { credentials: "include", signal: ac.signal })
-      .then((r) => (r.ok ? r.text() : Promise.reject(new Error("Could not load file."))))
-      .then((t) => setText(t.length > 2_000_000 ? t.slice(0, 2_000_000) + "\n\n... (truncated)" : t))
+      .then((r) => (r.ok ? r.text() : Promise.reject(new Error(t("app.preview.loadFileFailed")))))
+      .then((body) => setText(body.length > 2_000_000 ? `${body.slice(0, 2_000_000)}\n\n${t("app.preview.truncated")}` : body))
       .catch((e) => { if (!ac.signal.aborted) setError(e.message); });
     return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rawUrl]);
 
   // Seed the editor draft from the loaded text when entering edit mode.
@@ -257,9 +271,9 @@ function TextPreview({ path, rawUrl, csv, tsv, writable, startEditing, onSaved }
       setText(draft);
       setEditing(false);
       onSaved?.();
-      push({ level: "success", title: "Saved", body: "Your changes were written to disk." });
+      push({ level: "success", title: t("app.preview.saved"), body: t("app.preview.savedBody") });
     } catch (err) {
-      push({ level: "warning", title: "Couldn't save", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.preview.saveFailed"), body: err instanceof ApiRequestError ? err.message : t("app.files.failed") });
     } finally {
       setSaving(false);
     }
@@ -272,10 +286,10 @@ function TextPreview({ path, rawUrl, csv, tsv, writable, startEditing, onSaved }
     return (
       <div className="flex max-h-full w-full max-w-4xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
         <div className="flex items-center gap-2 border-b border-slate-200 px-3 py-2">
-          <span className="flex-1 text-xs font-medium text-ink-faint">Editing</span>
-          <button onClick={() => setEditing(false)} disabled={saving} className="rounded-md px-2.5 py-1 text-xs font-medium text-ink-soft transition hover:bg-slate-100 disabled:opacity-50">Cancel</button>
+          <span className="flex-1 text-xs font-medium text-ink-faint">{t("app.preview.editing")}</span>
+          <button onClick={() => setEditing(false)} disabled={saving} className="rounded-md px-2.5 py-1 text-xs font-medium text-ink-soft transition hover:bg-slate-100 disabled:opacity-50">{t("common.cancel")}</button>
           <button onClick={() => void save()} disabled={saving} className="inline-flex items-center gap-1.5 rounded-md bg-brand-600 px-2.5 py-1 text-xs font-medium text-white transition hover:bg-brand-500 disabled:opacity-50">
-            {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} Save
+            {saving ? <Loader2 size={13} className="animate-spin" /> : <Save size={13} />} {t("common.save")}
           </button>
         </div>
         <textarea
@@ -312,8 +326,8 @@ function TextPreview({ path, rawUrl, csv, tsv, writable, startEditing, onSaved }
     <div className="flex max-h-full w-full max-w-4xl flex-col overflow-hidden rounded-xl bg-white shadow-2xl">
       {editable && (
         <div className="flex items-center justify-end border-b border-slate-200 px-3 py-1.5">
-          <button onClick={() => setEditing(true)} className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-ink-soft transition hover:bg-slate-100" title="Edit">
-            <Pencil size={13} /> Edit
+          <button onClick={() => setEditing(true)} className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-ink-soft transition hover:bg-slate-100" title={t("common.edit")}>
+            <Pencil size={13} /> {t("common.edit")}
           </button>
         </div>
       )}
@@ -344,7 +358,8 @@ function parseCsvLine(line: string, sep: string): string[] {
 }
 
 function DocxPreview({ rawUrl }: { rawUrl: string }) {
-  const ref = useRef<HTMLDivElement>(null);
+  const t = useT();
+  const hostRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -355,26 +370,42 @@ function DocxPreview({ rawUrl }: { rawUrl: string }) {
     (async () => {
       try {
         const res = await fetch(rawUrl, { credentials: "include" });
-        if (!res.ok) throw new Error("Could not load document.");
+        if (!res.ok) throw new Error(t("app.preview.loadDocFailed"));
         const buf = await res.arrayBuffer();
         const { renderAsync } = await import("docx-preview");
-        if (cancelled || !ref.current) return;
-        ref.current.innerHTML = "";
-        await renderAsync(buf, ref.current, undefined, { className: "docx", inWrapper: true });
+        const host = hostRef.current;
+        if (cancelled || !host) return;
+        // docx-preview writes <style> elements built from the document's own
+        // styles, and those selectors are whatever the file says. Rendered into
+        // the light DOM they would restyle the whole desktop, so the output goes
+        // into a shadow root: styles inside it can't reach the page, and the
+        // page's styles can't reach in.
+        const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" });
+        const styles = document.createElement("div");
+        const body = document.createElement("div");
+        body.className = "opennas-docx";
+        shadow.replaceChildren(styles, body);
+        await renderAsync(buf, body, styles, { className: "docx", inWrapper: true });
+        // The document's hyperlink targets are whatever the file says -
+        // including `javascript:` - and a shadow root doesn't change the origin
+        // they'd run in. Take out anything executable before it can be clicked.
+        defuseRenderedMarkup(styles);
+        defuseRenderedMarkup(body);
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : "Failed to render document.");
+        if (!cancelled) setError(e instanceof Error ? e.message : t("app.preview.renderDocFailed"));
       } finally {
         if (!cancelled) setLoading(false);
       }
     })();
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rawUrl]);
 
   return (
     <div className="relative max-h-full w-full max-w-4xl overflow-auto rounded-xl bg-white shadow-2xl">
       {loading && <div className="grid place-items-center py-10"><Spinner /></div>}
       {error && <div className="px-5 py-4 text-sm text-rose-600">{error}</div>}
-      <div ref={ref} className="opennas-docx" />
+      <div ref={hostRef} />
     </div>
   );
 }

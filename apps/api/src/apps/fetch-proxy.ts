@@ -139,22 +139,58 @@ export function isPublicAddress(ip: string): boolean {
   if (version === 4) return isPublicV4(ip);
   if (version !== 6) return false;
 
-  const addr = ip.toLowerCase().split("%")[0]!; // drop any zone id
-  // IPv4-mapped (::ffff:1.2.3.4) and IPv4-embedded forms are judged as IPv4.
-  const embedded = /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(addr);
-  if (embedded && (addr.startsWith("::ffff:") || addr.startsWith("::") || addr.startsWith("64:ff9b:"))) {
-    return isPublicV4(embedded[1]!);
-  }
-  if (addr === "::" || addr === "::1") return false; // unspecified / loopback
-  const head = addr.split(":")[0] ?? "";
-  const group = parseInt(head || "0", 16);
-  if (Number.isNaN(group)) return false;
-  if ((group & 0xfe00) === 0xfc00) return false; // fc00::/7 unique-local
-  if ((group & 0xffc0) === 0xfe80) return false; // fe80::/10 link-local
-  if ((group & 0xff00) === 0xff00) return false; // ff00::/8 multicast
-  if (group === 0x2002) return false; // 6to4 - wraps an arbitrary v4 address
-  if (group === 0x0100) return false; // 100::/64 discard-only
+  const groups = parseV6(ip);
+  if (!groups) return false;
+  const [g0, g1, g2, g3, g4, g5, g6, g7] = groups as [number, number, number, number, number, number, number, number];
+  const v4 = `${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`;
+
+  // Forms that carry an IPv4 address in their low 32 bits are judged as that
+  // address - otherwise `::ffff:7f00:1` (127.0.0.1 written in hex) or
+  // `64:ff9b::a00:1` (10.0.0.1 via a NAT64 gateway) walk straight past the v4
+  // checks. Judged on the parsed groups, never on how the text was spelled.
+  const zero4 = g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0;
+  if (zero4 && g4 === 0 && g5 === 0xffff) return isPublicV4(v4); // ::ffff:0:0/96 mapped
+  if (zero4 && g4 === 0xffff && g5 === 0) return isPublicV4(v4); // ::ffff:0:0:0/96 translated (SIIT)
+  // ::/96 compatible (deprecated) - also covers :: and ::1, as 0.0.0.0/8.
+  if (zero4 && g4 === 0 && g5 === 0) return isPublicV4(v4);
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return isPublicV4(v4); // NAT64
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 1) return false; // 64:ff9b:1::/48 local-use NAT64
+
+  if (zero4) return false; // anything else in ::/64 is not a real destination
+  if ((g0 & 0xfe00) === 0xfc00) return false; // fc00::/7 unique-local
+  if ((g0 & 0xffc0) === 0xfe80) return false; // fe80::/10 link-local
+  if ((g0 & 0xffc0) === 0xfec0) return false; // fec0::/10 site-local (deprecated, still routed by some)
+  if ((g0 & 0xff00) === 0xff00) return false; // ff00::/8 multicast
+  if (g0 === 0x2002) return false; // 6to4 - wraps an arbitrary v4 address
+  if (g0 === 0x2001 && g1 === 0) return false; // 2001::/32 Teredo - wraps one too
+  if (g0 === 0x2001 && g1 === 0x0db8) return false; // documentation
+  if (g0 === 0x0100 && g1 === 0 && g2 === 0 && g3 === 0) return false; // 100::/64 discard-only
   return true;
+}
+
+/**
+ * An IPv6 address as its eight 16-bit groups, or null if it isn't one. Expands
+ * `::`, accepts a trailing dotted IPv4 and drops a zone id.
+ */
+export function parseV6(ip: string): number[] | null {
+  let addr = ip.toLowerCase().split("%")[0]!;
+  if (isIP(addr) !== 6) return null;
+  const dotted = /(\d{1,3}(?:\.\d{1,3}){3})$/.exec(addr);
+  if (dotted) {
+    const n = ipv4ToInt(dotted[1]!);
+    if (n === null) return null;
+    addr = addr.slice(0, -dotted[1]!.length) + `${(n >>> 16).toString(16)}:${(n & 0xffff).toString(16)}`;
+  }
+  const halves = addr.split("::");
+  if (halves.length > 2) return null;
+  const parse = (part: string) => (part === "" ? [] : part.split(":").map((h) => parseInt(h, 16)));
+  const head = parse(halves[0]!);
+  const tail = halves.length === 2 ? parse(halves[1]!) : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0) return null;
+  const groups = [...head, ...new Array<number>(fill).fill(0), ...tail];
+  if (groups.length !== 8 || groups.some((g) => Number.isNaN(g) || g < 0 || g > 0xffff)) return null;
+  return groups;
 }
 
 /**

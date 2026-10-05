@@ -148,7 +148,9 @@ async function unallocatedFor(disk: string): Promise<number | null> {
 /** Read a disk's S.M.A.R.T. health via smartctl (privileged; linux mode only). */
 async function smartFor(disk: string): Promise<SmartInfo | null> {
   if (config.systemMode !== "linux") return null;
-  const out = await execCapture("doas", ["smartctl", "-j", "-H", "-A", "-i", disk]);
+  // Through the storage helper, which only hands smartctl a real disk node -
+  // a raw `smartctl` doas rule took any arguments at all.
+  const out = await execCapture("doas", ["/usr/lib/opennas/opennas-storage", "smart", disk]);
   if (!out) return null;
   let j: SmartJson;
   try {

@@ -65,6 +65,8 @@ export function removeLink(userId: string, id: string): void {
 /** Raw lookup for the public endpoint (no user scoping). */
 export interface PublicLink {
   id: string;
+  /** Who created the link - it serves with their access, and only while they have it. */
+  userId: string;
   virtualPath: string;
   isDir: boolean;
   passwordHash: string | null;
@@ -72,11 +74,11 @@ export interface PublicLink {
 }
 
 export function getPublicLink(id: string): PublicLink | null {
-  const r = db.prepare("SELECT id, virtual_path, is_dir, password_hash, expires_at FROM share_links WHERE id = ?").get(id) as
-    | { id: string; virtual_path: string; is_dir: number; password_hash: string | null; expires_at: string | null }
+  const r = db.prepare("SELECT id, user_id, virtual_path, is_dir, password_hash, expires_at FROM share_links WHERE id = ?").get(id) as
+    | { id: string; user_id: string; virtual_path: string; is_dir: number; password_hash: string | null; expires_at: string | null }
     | undefined;
   if (!r) return null;
-  return { id: r.id, virtualPath: r.virtual_path, isDir: r.is_dir === 1, passwordHash: r.password_hash, expiresAt: r.expires_at };
+  return { id: r.id, userId: r.user_id, virtualPath: r.virtual_path, isDir: r.is_dir === 1, passwordHash: r.password_hash, expiresAt: r.expires_at };
 }
 
 export function deleteLinkById(id: string): void {

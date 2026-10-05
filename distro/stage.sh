@@ -39,6 +39,9 @@ install -D -m 0755 "$ROOT/packaging/opennas-logs" "$BUILD/payload/usr/lib/openna
 install -D -m 0755 "$ROOT/packaging/opennas-firewall" "$BUILD/payload/usr/lib/opennas/opennas-firewall"
 install -D -m 0755 "$ROOT/packaging/opennas-update" "$BUILD/payload/usr/lib/opennas/opennas-update"
 install -D -m 0755 "$ROOT/packaging/opennas-zfs" "$BUILD/payload/usr/lib/opennas/opennas-zfs"
+# The doas policy, in the same place an update bundle carries it, so the
+# installer and opennas-update install the one file.
+install -D -m 0644 "$ROOT/packaging/doas-opennas.conf" "$BUILD/payload/usr/lib/opennas/service/doas-opennas.conf"
 # The public half of the release key. Every installed machine checks update
 # bundles against this, so an ISO built without one simply cannot self-update -
 # which is the safe failure, rather than accepting anything.

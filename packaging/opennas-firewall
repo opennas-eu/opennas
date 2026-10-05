@@ -2,7 +2,7 @@
 # Privileged firewall helper. The backend runs unprivileged and reaches this
 # through doas (see /etc/doas.d/opennas.conf), which allow-lists this exact path.
 #
-#   opennas-firewall apply <file>   load a ruleset (validated first) and persist it
+#   opennas-firewall apply <file>   load the staged ruleset (validated first) and persist it
 #   opennas-firewall disable        flush our table; the host stops filtering
 #   opennas-firewall status         "active" | "inactive" | "unavailable"
 #   opennas-firewall ban <ip> <s>   drop traffic from <ip> for <s> seconds
@@ -20,21 +20,37 @@ set -eu
 # unreachable after the next reboot even once our rules were removed.
 RULES=/etc/opennas/firewall.nft
 SERVICE=opennas-firewall
+# The one place a ruleset is accepted from: what the backend generates into its
+# data dir. `nft -f` runs as root, and nft's `include` reads any file it is
+# given - so an arbitrary path (or an include inside the file) would let the
+# caller have root parse, and echo back pieces of, files it cannot read itself.
+STAGED=/var/lib/opennas/generated/opennas.nft
 
 have_nft() { command -v nft >/dev/null 2>&1; }
 
 case "${1:-}" in
 apply)
 	file="${2:?usage: opennas-firewall apply <file>}"
+	[ "$file" = "$STAGED" ] || { echo "rulesets are only accepted from $STAGED" >&2; exit 1; }
+	[ -L "$file" ] && { echo "refusing a symlinked ruleset" >&2; exit 1; }
 	[ -f "$file" ] || { echo "no such ruleset: $file" >&2; exit 1; }
 	have_nft || { echo "nftables is not installed" >&2; exit 2; }
-	nft -c -f "$file" || { echo "ruleset failed validation; nothing was loaded" >&2; exit 3; }
-	nft -f "$file"
+	# Work on a private copy from here on, so what is checked is what is loaded
+	# and what is persisted - the staged file stays writable by the backend.
+	work=$(mktemp -d)
+	trap 'rm -rf "$work"' EXIT
+	head -c 1048576 < "$file" > "$work/ruleset.nft"
+	if grep -qiw include "$work/ruleset.nft"; then
+		echo "ruleset contains an include; nothing was loaded" >&2; exit 3
+	fi
+	nft -c -f "$work/ruleset.nft" || { echo "ruleset failed validation; nothing was loaded" >&2; exit 3; }
+	nft -f "$work/ruleset.nft"
 	# Persist for the next boot. Written only after a successful load, so a
 	# ruleset that bricks the network can never be the one that comes back.
 	mkdir -p "$(dirname "$RULES")"
-	cp "$file" "$RULES"
-	chmod 0644 "$RULES"
+	cp "$work/ruleset.nft" "$RULES.new"
+	chmod 0644 "$RULES.new"
+	mv -f "$RULES.new" "$RULES"
 	rc-update add "$SERVICE" default 2>/dev/null || true
 	;;
 disable)
