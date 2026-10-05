@@ -39,6 +39,22 @@ set -eu
 
 VOLROOT=/var/lib/opennas/volumes
 
+# volume_root_prep <dir> - a volume's mount directory is root's, so the service
+# account cannot swap a share directory inside it for a symlink after
+# `opennas-sysctl share-apply` has checked it. Shares get their directories from
+# `opennas-sysctl share-dir`; VM disks and container data go in an `opennas`
+# directory inside, which is the service account's.
+volume_root_prep() {
+	[ -d "$1" ] && [ ! -L "$1" ] || return 0
+	chown -h 0:0 "$1" 2>/dev/null || true
+	{ [ ! -L "$1" ] && [ -O "$1" ]; } || return 0
+	chmod 0755 "$1" 2>/dev/null || true
+	if [ ! -e "$1/opennas" ] && [ ! -L "$1/opennas" ]; then
+		mkdir -m 0755 "$1/opennas" 2>/dev/null && chown -h opennas:opennas "$1/opennas" 2>/dev/null || true
+	fi
+	return 0
+}
+
 # ---- Validation ------------------------------------------------------------
 #
 # Names reach `zpool`/`zfs` as arguments and become directory names under
@@ -92,6 +108,57 @@ guard_pool() {
 	valid_name "$_p" || die "invalid pool name"
 	[ "$_p" = "$(root_pool)" ] && die "refusing to touch the pool this system is running from"
 	return 0
+}
+
+# Is a disk genuinely unused? The same rule as opennas-storage: "nothing
+# mounted" is not enough, because a disk from an exported pool, a stopped md
+# array, an LVM PV or a LUKS container all look unmounted and are full of data.
+disk_unused() {
+	_d="$1"
+	if lsblk -nro MOUNTPOINT "$_d" 2>/dev/null | grep -q .; then
+		echo "disk in use: $_d" >&2; return 1
+	fi
+	if lsblk -nro FSTYPE "$_d" 2>/dev/null | grep -qE '^(linux_raid_member|zfs_member|LVM2_member|crypto_LUKS|bcache|ceph_bluestore|drbd|swap)$'; then
+		echo "disk is a member of an array, pool or volume group: $_d" >&2; return 1
+	fi
+	if lsblk -nro TYPE "$_d" 2>/dev/null | grep -qvE '^(disk|part)$'; then
+		echo "disk is part of an array or mapped device: $_d" >&2; return 1
+	fi
+	return 0
+}
+
+# Import one pool without mounting anything, check where every dataset would
+# land, and only then mount. `zpool import` on its own honours whatever
+# mountpoints the pool carries, so a pool from anywhere - another machine, a
+# USB stick someone plugged in - could mount a dataset over /etc or /usr/lib/opennas.
+import_pool() {
+	_p="$1"
+	valid_name "$_p" || die "invalid pool name"
+	zpool list -H -o name 2>/dev/null | grep -qx "$_p" && die "a pool called '$_p' is already imported"
+	[ -e "$VOLROOT/$_p" ] && [ -n "$(ls -A "$VOLROOT/$_p" 2>/dev/null)" ] && die "something is already at $VOLROOT/$_p"
+	mkdir -p "$VOLROOT"
+	if ! out=$(zpool import -N -f -o cachefile=/etc/zfs/zpool.cache "$_p" 2>&1); then
+		die "zpool import failed: $(printf '%s' "$out" | tr '\n' ' ')"
+	fi
+	# A pool from another system usually still has the default mountpoint,
+	# /<pool>. Move its root under the volume root, where OpenNAS keeps pools;
+	# children that inherit follow it.
+	if [ "$(zfs get -H -o source mountpoint "$_p" 2>/dev/null)" = "default" ]; then
+		zfs set mountpoint="$VOLROOT/$_p" "$_p" >/dev/null 2>&1 || true
+	fi
+	# Every filesystem must mount inside $VOLROOT/<pool>, or not at all.
+	_bad=$(zfs list -H -r -t filesystem -o name,mountpoint "$_p" 2>/dev/null | awk -F'\t' -v root="$VOLROOT/$_p" '
+		$2 == "none" || $2 == "legacy" || $2 == "-" { next }
+		$2 == root { next }
+		index($2, root "/") == 1 && $2 !~ /\/\.\.(\/|$)/ { next }
+		{ print $1 }')
+	if [ -n "$_bad" ]; then
+		zpool export "$_p" >/dev/null 2>&1 || true
+		die "refusing to import '$_p': it has datasets that would mount outside $VOLROOT/$_p ($(printf '%s' "$_bad" | tr '\n' ' '))"
+	fi
+	zfs mount -a >/dev/null 2>&1 || true
+	volume_root_prep "$VOLROOT/$_p"
+	echo "imported $_p"
 }
 
 # ---- Read-only -------------------------------------------------------------
@@ -195,7 +262,7 @@ pool-create)
 	for d in "$@"; do
 		case "$d" in /dev/*) ;; *) die "invalid disk path: $d" ;; esac
 		[ -b "$d" ] || die "not a block device: $d"
-		if lsblk -nro MOUNTPOINT "$d" 2>/dev/null | grep -q .; then die "disk in use: $d"; fi
+		disk_unused "$d" || exit 1
 	done
 
 	mkdir -p "$VOLROOT"
@@ -281,7 +348,7 @@ pool-create)
 	# So the pool comes back after a reboot. zpool.cache plus the zfs-import
 	# service is what actually does it; this makes the intent explicit.
 	zpool set cachefile=/etc/zfs/zpool.cache "$pool" 2>/dev/null || true
-	chown opennas:opennas "$VOLROOT/$pool" 2>/dev/null || true
+	volume_root_prep "$VOLROOT/$pool"
 	echo "created pool $pool ($layout, $n disks) -> $VOLROOT/$pool"
 	;;
 
@@ -289,7 +356,15 @@ pool-destroy)
 	need_zfs
 	pool="${2:?pool}"; guard_pool "$pool"
 	zpool list -H -o name 2>/dev/null | grep -qx "$pool" || die "no such pool: $pool"
+	# The member devices, so their labels can be cleared afterwards. A destroyed
+	# pool leaves its labels behind, and pool-create rightly refuses a disk that
+	# still says zfs_member - which would make "rebuild on the same disks" fail.
+	members=$(zpool status -P "$pool" 2>/dev/null | awk '$1 ~ /^\/dev\// { print $1 }')
 	if ! out=$(zpool destroy -f "$pool" 2>&1); then die "could not destroy the pool: $(printf '%s' "$out" | tr '\n' ' ')"; fi
+	for m in $members; do
+		zpool labelclear -f "$m" >/dev/null 2>&1 || true
+		wipefs -aq "$m" >/dev/null 2>&1 || true
+	done
 	rmdir "$VOLROOT/$pool" 2>/dev/null || true
 	echo "destroyed pool $pool"
 	;;
@@ -304,13 +379,16 @@ pool-export)
 pool-import)
 	need_zfs
 	if [ -n "${2:-}" ]; then
-		pool="$2"; valid_name "$pool" || die "invalid pool name"
-		mkdir -p "$VOLROOT"
-		zpool import -f -o cachefile=/etc/zfs/zpool.cache -R / "$pool" 2>&1 || die "zpool import failed"
-		echo "imported $pool"
+		import_pool "$2"
 	else
-		zpool import -a -f -o cachefile=/etc/zfs/zpool.cache 2>&1 || true
+		# One at a time, through the same checks; a pool that fails them is
+		# reported and left exported rather than stopping the others.
+		rc=0
+		for pool in $(zpool import 2>/dev/null | sed -n 's/^ *pool: *//p'); do
+			( import_pool "$pool" ) || rc=1
+		done
 		echo "imported all available pools"
+		exit "$rc"
 	fi
 	;;
 

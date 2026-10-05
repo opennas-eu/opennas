@@ -57,6 +57,7 @@ for f in opennas.openrc opennas-tls.openrc opennas-firewall.openrc opennas-banne
 done
 install -m 0644 "$ROOT/packaging/nginx-opennas.conf"   "$STAGE/opennas/service/nginx-opennas.conf"
 install -m 0644 "$ROOT/packaging/opennas-avahi.service" "$STAGE/opennas/service/opennas-avahi.service"
+install -m 0644 "$ROOT/packaging/doas-opennas.conf"     "$STAGE/opennas/service/doas-opennas.conf"
 
 mkdir -p "$OUT"
 BUNDLE="$OUT/opennas-${FULL}.tar.gz"

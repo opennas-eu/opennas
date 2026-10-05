@@ -184,7 +184,15 @@ export function listStorageTargets(): { label: string; name: string; path: strin
  */
 function targetBase(target: string | null | undefined, kind: "vm" | "containers"): string {
   const vol = target ? volumePath(target) : null;
-  if (vol) return ensure(resolve(vol, "opennas", kind));
+  if (vol) {
+    try {
+      return ensure(resolve(vol, "opennas", kind));
+    } catch {
+      // A volume's mount directory is root's on the appliance, and its
+      // `opennas` directory is made by the storage helpers when they mount
+      // it. One that predates that falls back like a stale label does.
+    }
+  }
   return kind === "vm" ? vmBase() : containerBase();
 }
 

@@ -120,6 +120,7 @@ import {
   mountVolume,
   powerAction,
   regenerateSelfSignedCert,
+  isManageableAccountName,
   reloadFileServices,
   reloadWebProxy,
   removeShareGroup,
@@ -132,6 +133,7 @@ import {
   syncShareGroup,
   syncShareUser,
   unmountVolume,
+  createShareDir,
 } from "../system/integration.js";
 import { listRaidArrays, listStorage, listStorageWithHealth, listVolumes } from "../system/storage.js";
 import { getStorageLocations, listStorageTargets, setStorageLocations, storageDefaults } from "../system/storage-paths.js";
@@ -392,7 +394,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   });
 
   const createSchema = z.object({
-    username: z.string().trim().min(2).max(32).regex(usernameRe),
+    username: z.string().trim().min(2).max(32).regex(usernameRe).refine(isManageableAccountName, { message: "That name is reserved for the system." }),
     displayName: z.string().trim().min(1).max(64),
     email: z.string().email().optional().or(z.literal("")).transform((v) => v || null),
     role: z.enum(["admin", "user"]),
@@ -563,7 +565,8 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
 
     const share = createShare({ ...parsed.data, name });
     try {
-      await mkdir(shareBasePath(share), { recursive: true });
+      // Through the helper on the appliance, where the share roots are root's.
+      if (!(await createShareDir(req.log, share, shareBasePath(share)))) throw new Error("share-dir failed");
     } catch (err) {
       // Roll back the row so we don't leave a share pointing at a folder we
       // couldn't create (e.g. an unwritable volume mount).
@@ -798,6 +801,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(409).send({ error: "too_many", message: `A share may have at most ${MAX_NFS_RULES} NFS rules.` });
     }
     applyGeneratedConfigs(req.log);
+    await reloadFileServices(req.log);
     return reply.code(201).send({ rules: listNfsRules(id) });
   });
 
@@ -807,6 +811,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     req.audit({ share: id, rule: ruleId });
     deleteNfsRule(id, ruleId);
     applyGeneratedConfigs(req.log);
+    await reloadFileServices(req.log);
     return { rules: listNfsRules(id) };
   });
 
@@ -882,7 +887,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   const groupSchema = z.object({
     // Same charset as a username: the name becomes a system group so Samba can
     // be told `valid users = @<name>`.
-    name: z.string().trim().min(2).max(32).regex(usernameRe),
+    name: z.string().trim().min(2).max(32).regex(usernameRe).refine(isManageableAccountName, { message: "That name is reserved for the system." }),
     description: z.string().trim().max(255).optional(),
   });
 

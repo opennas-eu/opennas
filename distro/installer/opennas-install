@@ -132,31 +132,38 @@ partname() { case "$1" in *[0-9]) echo "${1}p${2}";; *) echo "${1}${2}";; esac; 
 KEYMAP=$(answer KEYMAP "")
 KEYMAP_VARIANT=$(answer KEYMAP_VARIANT "")
 
+# Menus are built as positional parameters, never as a string for `eval`: the
+# items include text read off the hardware (a disk's model string), and anything
+# a USB stick reports as its model would otherwise run as root right here.
 if [ -z "$KEYMAP" ] && [ "$UNATTENDED" != "yes" ]; then
 	# Offer whatever the ISO actually ships, so the list can never name a layout
 	# that isn't installed; fall back to a common set if the tree is missing.
-	km_items=""
+	set --
 	if [ -d /usr/share/bkeymaps ]; then
 		for d in /usr/share/bkeymaps/*; do
 			[ -d "$d" ] || continue
 			l=$(basename "$d")
-			km_items="$km_items $l \"$l\""
+			set -- "$@" "$l" "$l"
 		done
 	fi
-	[ -n "$km_items" ] || km_items=' us "us" gb "gb" de "de" fr "fr" es "es" it "it" dk "dk" no "no" se "se" fi "fi" nl "nl" pl "pl" pt "pt" cz "cz" hu "hu" ch "ch" ru "ru" ua "ua" br "br" tr "tr" jp "jp"'
-	KEYMAP=$(eval whiptail --title "'$TITLE'" --menu "'Keyboard layout (used for the password you type next):'" 20 60 12 $km_items 3>&1 1>&2 2>&3) || exit 1
+	if [ "$#" -eq 0 ]; then
+		for l in us gb de fr es it dk no se fi nl pl pt cz hu ch ru ua br tr jp; do
+			set -- "$@" "$l" "$l"
+		done
+	fi
+	KEYMAP=$(whiptail --title "$TITLE" --menu "Keyboard layout (used for the password you type next):" 20 60 12 "$@" 3>&1 1>&2 2>&3) || exit 1
 
 	# Some layouts ship several variants (de/de-nodeadkeys, us/us-intl, ...).
-	var_items=""
+	set --
 	if [ -d "/usr/share/bkeymaps/$KEYMAP" ]; then
 		for f in "/usr/share/bkeymaps/$KEYMAP"/*.bmap*; do
 			[ -e "$f" ] || continue
 			v=$(basename "$f"); v=${v%.gz}; v=${v%.bmap}
-			var_items="$var_items $v \"$v\""
+			set -- "$@" "$v" "$v"
 		done
 	fi
-	if [ -n "$var_items" ]; then
-		KEYMAP_VARIANT=$(eval whiptail --title "'$TITLE'" --menu "'Layout variant:'" 18 60 8 $var_items 3>&1 1>&2 2>&3) || exit 1
+	if [ "$#" -gt 0 ]; then
+		KEYMAP_VARIANT=$(whiptail --title "$TITLE" --menu "Layout variant:" 18 60 8 "$@" 3>&1 1>&2 2>&3) || exit 1
 	fi
 fi
 
@@ -200,20 +207,23 @@ if [ -n "$TARGET" ] || [ -n "$RAID_DISKS" ]; then
 		WIPE_LIST="$TARGET"
 	fi
 elif [ "$MODE" = "single" ]; then
-	menu_items=""
+	set --
 	for dev in $(lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}'); do
-		menu_items="$menu_items /dev/$dev \"$(lsblk -dno SIZE "/dev/$dev") $(lsblk -dno MODEL "/dev/$dev" | tr -s ' ')\""
+		# The description is display text only; strip anything unprintable.
+		desc="$(lsblk -dno SIZE "/dev/$dev") $(lsblk -dno MODEL "/dev/$dev" | tr -s ' ' | tr -cd '[:print:]')"
+		set -- "$@" "/dev/$dev" "$desc"
 	done
-	[ -n "$menu_items" ] || die "no disks found"
-	TARGET=$(eval whiptail --title "'$TITLE'" --menu "'Select the install disk (it will be WIPED):'" 20 72 8 $menu_items 3>&1 1>&2 2>&3) || exit 1
+	[ "$#" -gt 0 ] || die "no disks found"
+	TARGET=$(whiptail --title "$TITLE" --menu "Select the install disk (it will be WIPED):" 20 72 8 "$@" 3>&1 1>&2 2>&3) || exit 1
 	WIPE_LIST="$TARGET"
 else
-	check_items=""
+	set --
 	for dev in $(lsblk -dno NAME,TYPE | awk '$2=="disk"{print $1}'); do
-		check_items="$check_items /dev/$dev \"$(lsblk -dno SIZE "/dev/$dev") $(lsblk -dno MODEL "/dev/$dev" | tr -s ' ')\" OFF"
+		desc="$(lsblk -dno SIZE "/dev/$dev") $(lsblk -dno MODEL "/dev/$dev" | tr -s ' ' | tr -cd '[:print:]')"
+		set -- "$@" "/dev/$dev" "$desc" OFF
 	done
-	[ -n "$check_items" ] || die "no disks found"
-	sel=$(eval whiptail --title "'$TITLE'" --checklist "'Select EXACTLY TWO disks for the RAID-1 mirror (BOTH WIPED):'" 20 74 8 $check_items 3>&1 1>&2 2>&3) || exit 1
+	[ "$#" -gt 0 ] || die "no disks found"
+	sel=$(whiptail --title "$TITLE" --checklist "Select EXACTLY TWO disks for the RAID-1 mirror (BOTH WIPED):" 20 74 8 "$@" 3>&1 1>&2 2>&3) || exit 1
 	RAID_DISKS=$(echo "$sel" | tr -d '"')
 	# shellcheck disable=SC2086
 	set -- $RAID_DISKS
@@ -526,7 +536,11 @@ install -D -m 0755 /usr/sbin/opennas "$mnt/usr/sbin/opennas"
 
 # TLS: the cert dir is owned by opennas so the web UI can replace the cert;
 # opennas-tls generates a self-signed one on first boot (before nginx starts).
+# Its parent, /etc/opennas, stays root-owned: the generator runs as root at boot
+# and builds the pair in a private directory there, so nothing the service
+# account controls is ever written through.
 mkdir -p "$mnt/etc/opennas/tls"
+chmod 0755 "$mnt/etc/opennas"
 
 # nginx ships a default vhost that also claims `listen 80 default_server`, which
 # collides with ours ("duplicate default server") and stops nginx from starting.
@@ -561,30 +575,13 @@ mkdir -p "$mnt/etc/samba"
 SMB
 [ -f "$mnt/etc/exports" ] || echo "# Managed by OpenNAS" > "$mnt/etc/exports"
 
-# doas policy: the unprivileged opennas service may run exactly these admin tools
-# as root (to reload the file-sharing daemons + manage Samba users) - nothing else.
+# doas policy: the unprivileged opennas service may run exactly the OpenNAS
+# helpers as root - nothing else. The policy ships in the payload
+# (packaging/doas-opennas.conf) so this and opennas-update install the same
+# file; see it for why there are no raw system tools in it.
 install -d -m 0755 "$mnt/etc/doas.d"
-cat > "$mnt/etc/doas.d/opennas.conf" <<'DOAS'
-# Allow OpenNAS (running as the 'opennas' user) to manage file sharing.
-permit nopass opennas as root cmd smbcontrol
-permit nopass opennas as root cmd exportfs
-permit nopass opennas as root cmd smbpasswd
-permit nopass opennas as root cmd adduser
-permit nopass opennas as root cmd deluser
-permit nopass opennas as root cmd addgroup
-permit nopass opennas as root cmd delgroup
-permit nopass opennas as root cmd rc-service
-permit nopass opennas as root cmd rc-update
-permit nopass opennas as root cmd smartctl
-permit nopass opennas as root cmd reboot
-permit nopass opennas as root cmd poweroff
-permit nopass opennas as root cmd /usr/lib/opennas/opennas-storage
-permit nopass opennas as root cmd /usr/lib/opennas/opennas-sysctl
-permit nopass opennas as root cmd /usr/lib/opennas/opennas-logs
-permit nopass opennas as root cmd /usr/lib/opennas/opennas-firewall
-permit nopass opennas as root cmd /usr/lib/opennas/opennas-update
-permit nopass opennas as root cmd /usr/lib/opennas/opennas-zfs
-DOAS
+install -m 0600 "$mnt/usr/lib/opennas/service/doas-opennas.conf" "$mnt/etc/doas.d/opennas.conf" \
+	|| die "the doas policy is missing from the install payload"
 chmod 0600 "$mnt/etc/doas.d/opennas.conf"
 
 # Members of the 'wheel' group (the admin user) may become root via doas.
@@ -592,14 +589,17 @@ echo "permit persist :wheel" > "$mnt/etc/doas.d/wheel.conf"
 chmod 0600 "$mnt/etc/doas.d/wheel.conf"
 
 # Turn on real-OS integration for the appliance. The backend runs UNPRIVILEGED
-# (as opennas) and uses doas for the few root commands; it writes the daemon
-# config files directly, so make those writable by opennas.
+# (as opennas) and uses doas for the few root commands. It does NOT write the
+# daemon configs: it generates them into its data dir, and `opennas-sysctl
+# share-apply` checks them and installs them into the root-owned /etc files.
+# The two paths below point the backend's "real" copies at that staging dir too,
+# so it never tries (and fails) to write /etc itself.
 cat >> "$mnt/etc/conf.d/opennas" <<'ENVV'
 
 # --- Set by the OpenNAS installer (real OS integration) ---
 export OPENNAS_SYSTEM_MODE=linux
-export OPENNAS_SMB_CONF=/etc/samba/smb.conf
-export OPENNAS_NFS_EXPORTS=/etc/exports
+export OPENNAS_SMB_CONF=/var/lib/opennas/generated/smb.conf
+export OPENNAS_NFS_EXPORTS=/var/lib/opennas/generated/exports
 ENVV
 # SSH access + authorized keys are managed for the console admin account.
 echo "export OPENNAS_SSH_USER=$ADMIN_USER" >> "$mnt/etc/conf.d/opennas"
@@ -817,7 +817,10 @@ chroot "$mnt" /bin/sh -e <<'CHROOT'
 addgroup -S opennas 2>/dev/null || true
 adduser -S -D -H -h /var/lib/opennas -s /sbin/nologin -G opennas opennas 2>/dev/null || true
 chown -R opennas:opennas /var/lib/opennas
-chmod 0750 /var/lib/opennas
+# Everything above a share directory is root's (the data dir root's and sticky),
+# so the service account cannot swap a share for a symlink once share-apply has
+# checked it. Share directories themselves are made by `opennas-sysctl share-dir`.
+/usr/lib/opennas/opennas-sysctl share-roots
 # Let the opennas service reach the Docker socket (Container manager).
 addgroup opennas docker 2>/dev/null || true
 # Let the opennas service drive libvirt + KVM (Virtual Machines app), unprivileged.
@@ -846,8 +849,12 @@ auth_unix_rw = "none"
 LIBVIRTCONF
 fi
 
-# Let the unprivileged opennas service rewrite the daemon configs + TLS cert.
-chown opennas:opennas /etc/samba/smb.conf /etc/exports 2>/dev/null || true
+# The daemon configs stay root's: an /etc/exports the service account could
+# write is one line away from exporting / with no_root_squash. The backend's
+# generated copies go through `opennas-sysctl share-apply` instead.
+chown root:root /etc/samba/smb.conf /etc/exports 2>/dev/null || true
+chmod 0644 /etc/samba/smb.conf /etc/exports 2>/dev/null || true
+# The TLS cert itself is the service's to replace (uploads, ACME).
 chown -R opennas:opennas /etc/opennas/tls 2>/dev/null || true
 chmod 0750 /etc/opennas/tls 2>/dev/null || true
 
