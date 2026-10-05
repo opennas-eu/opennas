@@ -16,7 +16,17 @@ interface Counter {
   total: number;
 }
 
-async function addPath(map: Record<string, Uint8Array>, realPath: string, archPath: string, counter: Counter): Promise<void> {
+/** Decides per real path whether an entry (and, for a folder, its contents) goes in. */
+export type ZipFilter = (realPath: string) => boolean;
+
+async function addPath(
+  map: Record<string, Uint8Array>,
+  realPath: string,
+  archPath: string,
+  counter: Counter,
+  include?: ZipFilter,
+): Promise<void> {
+  if (include && !include(realPath)) return;
   const s = await lstat(realPath).catch(() => null);
   if (!s) return;
   if (s.isDirectory()) {
@@ -27,7 +37,7 @@ async function addPath(map: Record<string, Uint8Array>, realPath: string, archPa
     }
     for (const e of entries) {
       if (!e.isFile() && !e.isDirectory()) continue;
-      await addPath(map, join(realPath, e.name), `${archPath}/${e.name}`, counter);
+      await addPath(map, join(realPath, e.name), `${archPath}/${e.name}`, counter, include);
     }
   } else if (s.isFile()) {
     counter.total += s.size;
@@ -36,11 +46,16 @@ async function addPath(map: Record<string, Uint8Array>, realPath: string, archPa
   }
 }
 
-/** Build a .zip (in memory) from a set of real paths; archive names = basenames. */
-export async function buildZip(realPaths: string[]): Promise<Uint8Array> {
+/**
+ * Build a .zip (in memory) from a set of real paths; archive names = basenames.
+ * `include`, when given, is consulted for every entry - callers pass the folder
+ * rules of whoever the archive is for, so a subfolder they can't open is left
+ * out rather than shipped inside a zip of its parent.
+ */
+export async function buildZip(realPaths: string[], include?: ZipFilter): Promise<Uint8Array> {
   const map: Record<string, Uint8Array> = {};
   const counter: Counter = { total: 0 };
-  for (const p of realPaths) await addPath(map, p, basename(p), counter);
+  for (const p of realPaths) await addPath(map, p, basename(p), counter, include);
   return zipSync(map, { level: 6 });
 }
 

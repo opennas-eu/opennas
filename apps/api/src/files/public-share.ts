@@ -3,8 +3,10 @@ import { lstat } from "node:fs/promises";
 import { basename } from "node:path";
 import type { FastifyReply, FastifyRequest } from "fastify";
 import { verifyPassword } from "../auth/password.js";
-import { deleteLinkById, getPublicLink } from "../db/share-links.js";
+import { deleteLinkById, getPublicLink, type PublicLink } from "../db/share-links.js";
+import { getUserById, isUserDisabled } from "../db/users.js";
 import { buildZip } from "./archive.js";
+import { pathAccess, subtreeReadFilter } from "./access.js";
 import { isInlineSafe, mimeOf } from "./mime.js";
 import { resolveSafe } from "./paths.js";
 
@@ -33,11 +35,25 @@ const passwordPage = (token: string, wrong: boolean) =>
      <form method="post" action="/s/${esc(token)}"><input type="password" name="password" placeholder="Password" autofocus><button type="submit">Unlock</button></form>`,
   );
 
+/**
+ * Whether the person who made a link could still open what it points at.
+ *
+ * A link is that person lending their access to whoever holds the URL, so it can
+ * never be worth more than their access is now: an account deleted or disabled,
+ * a share taken away, a folder rule added since - each ends the link too, rather
+ * than leaving a public door to something its creator has been shut out of.
+ */
+function creatorCanRead(link: PublicLink): boolean {
+  const user = getUserById(link.userId);
+  if (!user || isUserDisabled(user.id)) return false;
+  return pathAccess(user, link.virtualPath).read;
+}
+
 /** GET /s/:token - serve the shared file/folder (after expiry + password checks). */
 export async function servePublicLink(req: FastifyRequest, reply: FastifyReply): Promise<unknown> {
   const token = (req.params as { token: string }).token;
   const link = getPublicLink(token);
-  if (!link) return reply.code(404).type("text/html").send(notFoundPage());
+  if (!link || !creatorCanRead(link)) return reply.code(404).type("text/html").send(notFoundPage());
   if (link.expiresAt && new Date(link.expiresAt).getTime() < Date.now()) {
     deleteLinkById(token);
     return reply.code(410).type("text/html").send(expiredPage());
@@ -58,7 +74,8 @@ export async function servePublicLink(req: FastifyRequest, reply: FastifyReply):
   if (!s) return reply.code(404).type("text/html").send(notFoundPage());
 
   if (s.isDirectory()) {
-    const zip = await buildZip([real]);
+    const creator = getUserById(link.userId)!;
+    const zip = await buildZip([real], subtreeReadFilter(creator, link.virtualPath, real) ?? undefined);
     return reply
       .header("Content-Type", "application/zip")
       .header("Content-Disposition", `attachment; filename="${encodeURIComponent(basename(real))}.zip"`)
@@ -83,7 +100,7 @@ export async function servePublicLink(req: FastifyRequest, reply: FastifyReply):
 export async function checkPublicPassword(req: FastifyRequest, reply: FastifyReply): Promise<unknown> {
   const token = (req.params as { token: string }).token;
   const link = getPublicLink(token);
-  if (!link || !link.passwordHash) return reply.redirect(`/s/${token}`);
+  if (!link || !link.passwordHash || !creatorCanRead(link)) return reply.redirect(`/s/${token}`);
   if (link.expiresAt && new Date(link.expiresAt).getTime() < Date.now()) {
     return reply.code(410).type("text/html").send(expiredPage());
   }

@@ -19,7 +19,7 @@ import type {
   TotpStatus,
   User,
 } from "@opennas/shared";
-import { config } from "../config.js";
+import { config, shouldUseSecureCookie } from "../config.js";
 import { requireAuth } from "./plugin.js";
 import { hashPassword, validatePasswordStrength, verifyPassword } from "./password.js";
 import { screenPassword } from "./hibp.js";
@@ -30,7 +30,10 @@ import {
   verifyAuthentication,
   verifyRegistration,
 } from "./passkeys.js";
-import { beginLogin, completeLogin, oidcEnabled, OIDC_PROVIDER } from "./oidc.js";
+import { beginLogin, completeLogin, oidcEnabled, oidcStateBinding, oidcStateMatches, OIDC_PROVIDER } from "./oidc.js";
+
+/** Binds an SSO login to the browser that started it - see oidcStateBinding. */
+const OIDC_STATE_COOKIE = "opennas_oidc_state";
 import { generateRecoveryCodes, generateSecret, otpauthUri, verifyTotp } from "./totp.js";
 import { qrSvg } from "./qr.js";
 import { pendingActions } from "./pending.js";
@@ -82,8 +85,9 @@ import {
   toSummary,
 } from "../db/credentials.js";
 import { getSettingOr, setSetting } from "../db/settings.js";
+import { db } from "../db/index.js";
 import { getUserIdByOidc, linkOidcIdentity } from "../db/oidc.js";
-import { syncShareUser } from "../system/integration.js";
+import { isManageableAccountName, syncShareUser } from "../system/integration.js";
 
 function sessionInfo(user: User, methods: AuthMethod[], expiresAt: string): SessionInfo {
   return { user, authMethods: methods, expiresAt, pendingActions: pendingActions(user) };
@@ -122,7 +126,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
   const setupSchema = z.object({
     instanceName: z.string().trim().min(1).max(64),
-    username: z.string().trim().min(2).max(32).regex(/^[a-zA-Z0-9_.-]+$/),
+    username: z.string().trim().min(2).max(32).regex(/^[a-zA-Z0-9_.-]+$/).refine(isManageableAccountName, { message: "That name is reserved for the system." }),
     displayName: z.string().trim().min(1).max(64),
     password: z.string().min(8).max(256),
   });
@@ -140,14 +144,21 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     if (strength) return reply.code(400).send({ error: "weak_password", message: strength });
 
     const screen = await screenPassword(password); // policy is off during setup → flags only
-    const user = createUser({
-      username,
-      displayName,
-      role: "admin",
-      passwordHash: await hashPassword(password),
-    });
-    setPasswordPwned(user.id, screen.pwned);
-    setSetting("instance_name", instanceName);
+    const passwordHash = await hashPassword(password);
+    // The check at the top ran before two awaits, so two setup requests racing
+    // through them would both pass it and both create an administrator. The
+    // decisive check is here, in one synchronous transaction with the insert -
+    // nothing can interleave with it.
+    const user = db.transaction(() => {
+      if (countUsers() > 0) return null;
+      const created = createUser({ username, displayName, role: "admin", passwordHash });
+      setPasswordPwned(created.id, screen.pwned);
+      setSetting("instance_name", instanceName);
+      return created;
+    })();
+    if (!user) {
+      return reply.code(409).send({ error: "already_setup", message: "OpenNAS is already configured." });
+    }
     await syncShareUser(req.log, user.username, password); // SMB account (linux mode)
     const info = startSession(req, reply, user, ["password"]);
     return reply.code(201).send({ session: info } satisfies MeResponse);
@@ -639,15 +650,38 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ---- OIDC ("Login with SSO") -----------------------------------------
-  app.get("/oidc/start", async (_req, reply) => {
+  app.get("/oidc/start", async (req, reply) => {
     if (!oidcEnabled()) return reply.code(404).send({ error: "disabled", message: "SSO is not configured." });
-    const url = await beginLogin();
+    // Until setup has created the administrator, SSO is not a way in: the first
+    // account through the door would otherwise be whoever the IdP vouches for.
+    if (countUsers() === 0) return reply.redirect("/?sso_error=not_setup");
+    const { url, state } = await beginLogin();
+    // Lax, not Strict: the callback arrives as a top-level navigation from the
+    // IdP, which is exactly the cross-site request Lax still sends cookies on.
+    reply.setCookie(OIDC_STATE_COOKIE, oidcStateBinding(state), {
+      path: "/",
+      httpOnly: true,
+      sameSite: "lax",
+      secure: shouldUseSecureCookie(req.protocol === "https"),
+      signed: true,
+      maxAge: 10 * 60,
+    });
     return reply.redirect(url);
   });
 
   app.get("/oidc/callback", async (req, reply) => {
     if (!oidcEnabled()) return reply.code(404).send({ error: "disabled", message: "SSO is not configured." });
+    if (countUsers() === 0) return reply.redirect("/?sso_error=not_setup");
     const url = new URL(req.url, config.webauthn.origin);
+    // The login has to finish in the browser that started it - checked before
+    // the stored state is consumed, so a forged callback can't burn a real one.
+    const raw = req.cookies[OIDC_STATE_COOKIE];
+    const unsigned = raw ? req.unsignCookie(raw) : null;
+    reply.clearCookie(OIDC_STATE_COOKIE, { path: "/" });
+    if (!unsigned?.valid || !oidcStateMatches(unsigned.value, url.searchParams.get("state"))) {
+      req.log.warn({ ip: req.ip }, "OIDC callback without a matching state cookie - refused");
+      return reply.redirect("/?sso_error=state_mismatch");
+    }
     try {
       const claims = await completeLogin(url);
       let userId = getUserIdByOidc(OIDC_PROVIDER, claims.subject);
@@ -661,7 +695,9 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
           username,
           displayName: claims.displayName,
           email: claims.email,
-          role: countUsers() === 0 ? "admin" : "user",
+          // Never "admin": setup has already made one (checked above), and an
+          // IdP is not who decides who administers this box.
+          role: "user",
           source: OIDC_PROVIDER,
         });
         linkOidcIdentity(OIDC_PROVIDER, claims.subject, user.id);

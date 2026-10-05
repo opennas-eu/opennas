@@ -32,3 +32,7 @@ if (!process.env.OPENNAS_DATA_DIR) {
 // Keep the appliance's system-touching code paths in their generate-only mode
 // unless a test deliberately asks otherwise. A unit test must never reload smbd.
 process.env.OPENNAS_SYSTEM_MODE ??= "demo";
+
+// pino-pretty logs through a worker thread that keeps the test process alive
+// after the last test, so a suite that builds a server would hang instead of exit.
+process.env.OPENNAS_LOG_PRETTY ??= "false";

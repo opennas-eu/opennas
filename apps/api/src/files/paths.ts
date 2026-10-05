@@ -1,4 +1,5 @@
-import { resolve, sep, normalize, posix } from "node:path";
+import { lstatSync, realpathSync } from "node:fs";
+import { dirname, resolve, sep, normalize, posix } from "node:path";
 import { config } from "../config.js";
 import { getShareRowByName, listShares } from "../db/shares.js";
 
@@ -55,7 +56,53 @@ export function resolveSafe(virtualPath: string): string {
   if (real !== base && !real.startsWith(base + sep)) {
     throw new PathError("Path escapes the shared folder.");
   }
+  // The check above is lexical, and the filesystem is not: a symlink anywhere
+  // along the path - made over SMB, NFS, by an app or a shell user - would let
+  // `/Share/link/etc/passwd` read or write wherever the link points. So the
+  // deepest part of the path that exists is resolved for real and has to land
+  // inside the share's own real folder too.
+  if (real !== base) {
+    const realBase = realpathOrNull(base);
+    if (realBase !== null) {
+      const landed = realpathOfDeepestExisting(real);
+      if (landed !== realBase && !landed.startsWith(realBase + sep)) {
+        throw new PathError("Path escapes the shared folder.");
+      }
+    }
+  }
+  // The lexical path is returned rather than the resolved one, so toVirtual
+  // keeps working when the files root itself sits behind a symlink.
   return real;
+}
+
+function realpathOrNull(p: string): string | null {
+  try {
+    return realpathSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * realpath of `p`, or of its deepest existing ancestor when `p` doesn't exist
+ * yet. A dangling symlink on the way is not "doesn't exist": writing through it
+ * creates its target, wherever that is, so it resolves to "/" - which no share
+ * contains.
+ */
+function realpathOfDeepestExisting(p: string): string {
+  let current = p;
+  for (;;) {
+    const r = realpathOrNull(current);
+    if (r !== null) return r;
+    try {
+      if (lstatSync(current).isSymbolicLink()) return sep;
+    } catch {
+      /* genuinely absent - keep climbing */
+    }
+    const parent = dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
 }
 
 /** Convert a real path back to the virtual (share-rooted) path shown to the user. */

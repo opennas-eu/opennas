@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import type { AppManifest, AppPermission, PendingInstall } from "@opennas/shared";
 import { getInstalledApp } from "../db/installed-apps.js";
 import { isTrusted } from "./trust.js";
-import { commitPackage, validatePackage, type ValidatedPackage } from "./framework.js";
+import { AppError, commitPackage, validatePackage, type ValidatedPackage } from "./framework.js";
 
 /**
  * Packages that passed validation and are waiting for an admin to approve what
@@ -51,9 +51,12 @@ function grantedPermissions(appId: string): AppPermission[] {
  *
  * Consent is required when the package asks for a capability the installed
  * version doesn't already hold (every capability, on a fresh install), or when it
- * isn't from a publisher the admin has already trusted. A signed, trusted update
- * that asks for nothing new installs silently - that's what keeps one-click
- * installs and automatic updates one-click.
+ * isn't from a publisher the admin has already trusted, or when it is signed by
+ * a different key than the version already installed (or not signed at all when
+ * that one was). A trusted update from the same publisher that asks for nothing
+ * new installs silently - that's what keeps one-click installs and automatic
+ * updates one-click - but trusting two publishers is not consent for either to
+ * take over the other's app.
  */
 export function reviewPackage(pkg: ValidatedPackage): { needsConsent: boolean; details: Omit<PendingInstall, "token" | "expiresAt"> } {
   const m = pkg.manifest;
@@ -62,9 +65,12 @@ export function reviewPackage(pkg: ValidatedPackage): { needsConsent: boolean; d
   const permissions = m.permissions ?? [];
   const newPermissions = permissions.filter((p) => !granted.includes(p));
   const verified = !!m.signed && isTrusted(m.publisherFingerprint);
+  const signerChanged =
+    !!installed?.manifest.signed &&
+    (!m.signed || m.publisherFingerprint !== installed.manifest.publisherFingerprint);
 
   return {
-    needsConsent: newPermissions.length > 0 || !verified,
+    needsConsent: newPermissions.length > 0 || !verified || signerChanged,
     details: {
       appId: m.id,
       name: m.name,
@@ -129,6 +135,17 @@ export function discardStagedFor(appId: string): void {
   }
 }
 
+/**
+ * A repository download has to be the app that was asked for. Without this, a
+ * repository answering `/v1/apps/a/download` with app `b` would overwrite `b` -
+ * an app the admin never touched - under cover of installing or updating `a`.
+ */
+export function assertPackageId(pkg: ValidatedPackage, expectedId: string | undefined): void {
+  if (expectedId !== undefined && pkg.manifest.id !== expectedId) {
+    throw new AppError(`The repository sent a package for "${pkg.manifest.id}" instead of "${expectedId}".`);
+  }
+}
+
 /** Either the package went straight in, or it's staged awaiting review. */
 export type InstallOutcome =
   | { kind: "installed"; manifest: AppManifest }
@@ -144,8 +161,10 @@ export type InstallOutcome =
 export async function prepareInstall(
   buf: Buffer | Uint8Array,
   sourceRepo?: string | null,
+  expectedId?: string,
 ): Promise<InstallOutcome> {
   const pkg = validatePackage(buf);
+  assertPackageId(pkg, expectedId);
   const { needsConsent, details } = reviewPackage(pkg);
   if (!needsConsent) return { kind: "installed", manifest: await commitPackage(pkg, sourceRepo) };
   return { kind: "pending", pending: stagePackage(pkg, details, sourceRepo) };

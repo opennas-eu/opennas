@@ -272,8 +272,11 @@ export const config = {
     redirectUri: env("OPENNAS_OIDC_REDIRECT_URI", "http://localhost:5173/api/auth/oidc/callback"),
     scopes: env("OPENNAS_OIDC_SCOPES", "openid profile email"),
     buttonLabel: env("OPENNAS_OIDC_BUTTON_LABEL", "Login with SSO"),
-    /** Auto-provision a local user on first SSO login. */
-    autoCreateUsers: env("OPENNAS_OIDC_AUTOCREATE", "true") === "true",
+    /**
+     * Auto-provision a local user on first SSO login. Off unless asked for: on,
+     * every account the IdP will vouch for becomes an OpenNAS user.
+     */
+    autoCreateUsers: env("OPENNAS_OIDC_AUTOCREATE", "false") === "true",
   },
 
   /** Path to the built web UI, served as static files in production. */

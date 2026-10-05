@@ -34,7 +34,7 @@ import { websocketRoutes } from "./ws.js";
 import { oidcProvider } from "./oidc/provider.js";
 import { pruneOidc } from "./oidc/store.js";
 import { pruneEphemeral } from "./db/index.js";
-import { pendingGate } from "./auth/pending.js";
+import { pendingActions, pendingGate } from "./auth/pending.js";
 import { pruneOrphanAcls } from "./db/acls.js";
 import { challengeStore } from "./system/acme.js";
 import { startAcmeRenewal } from "./system/acme-manager.js";
@@ -43,11 +43,25 @@ import { pruneAudit } from "./db/audit.js";
 import { isDecoyPath, noteDecoyHit } from "./system/honeypot.js";
 import { canUseApp } from "./db/app-access.js";
 
+/**
+ * Is this the discovery endpoint? Compared without the query string, because
+ * the CORS delegator and the PNA hook both see the raw URL.
+ */
+function isDiscoverPath(url: string | undefined): boolean {
+  if (!url) return false;
+  const q = url.indexOf("?");
+  return (q === -1 ? url : url.slice(0, q)) === "/api/discover";
+}
+
 export async function buildServer(): Promise<FastifyInstance> {
+  // Pretty-printing runs in a pino worker thread. Read per call rather than from
+  // config so a test can turn it off: a short test process can finish before
+  // that worker has drained, and the worker then holds it open indefinitely.
+  const pretty = !config.isProd && process.env.OPENNAS_LOG_PRETTY !== "false";
   const app = Fastify({
     logger: {
       level: config.isProd ? "info" : "debug",
-      transport: config.isProd
+      transport: !pretty
         ? undefined
         : { target: "pino-pretty", options: { translateTime: "HH:MM:ss", ignore: "pid,hostname" } },
     },
@@ -117,9 +131,57 @@ export async function buildServer(): Promise<FastifyInstance> {
   // CORS: in dev, allow the Vite origin. In prod, allow the explicit
   // OPENNAS_CORS_ORIGINS list (split-origin frontend) or nothing (same-origin
   // reverse-proxy topology, where no cross-origin requests happen).
+  const defaultCorsOrigin = config.isProd
+    ? config.corsOrigins.length > 0
+      ? config.corsOrigins
+      : false
+    : config.webauthn.origin;
+
+  /**
+   * The Private Network Access opt-in, which is what makes a hosted finder
+   * (find-service/) possible at all.
+   *
+   * Chrome and Edge will not let a page on a public site touch a private
+   * address without asking the device first: before the real GET they send an
+   * `OPTIONS` carrying `Access-Control-Request-Private-Network: true`, and the
+   * device has to answer `Access-Control-Allow-Private-Network: true` or the
+   * request is blocked.
+   *
+   * This has to be an `onRequest` hook registered *before* @fastify/cors, not a
+   * route. @fastify/cors answers preflights from its own `onRequest` hook and
+   * replies immediately, so a route-level `OPTIONS /api/discover` handler never
+   * runs and the header never ships. Headers set here survive that short-circuit.
+   *
+   * Opting in is safe precisely because the route it guards returns a constant:
+   * it grants a page permission to learn that an OpenNAS exists at an address,
+   * which anything on the LAN already learns from the mDNS broadcast.
+   */
+  app.addHook("onRequest", async (req, reply) => {
+    if (!isDiscoverPath(req.raw.url)) return;
+    if (req.headers["access-control-request-private-network"] === "true") {
+      reply.header("Access-Control-Allow-Private-Network", "true");
+    }
+  });
+
   await app.register(cors, {
-    origin: config.isProd ? (config.corsOrigins.length > 0 ? config.corsOrigins : false) : config.webauthn.origin,
-    credentials: true,
+    // Per-request, so /api/discover can be open to everyone while every other
+    // route keeps the narrow origin list. A single static `origin` cannot do
+    // both, and `credentials: true` alongside `origin: "*"` is rejected outright
+    // by browsers - so discovery turns credentials off as well.
+    delegator(req, cb) {
+      if (isDiscoverPath(req.raw.url)) {
+        cb(null, {
+          origin: "*",
+          credentials: false,
+          methods: ["GET", "OPTIONS"],
+          // A scan is 254 addresses. Without a cached preflight that is 508
+          // requests instead of 254.
+          maxAge: 86400,
+        });
+        return;
+      }
+      cb(null, { origin: defaultCorsOrigin, credentials: true });
+    },
   });
   await app.register(websocket);
   await app.register(multipart, {
@@ -151,6 +213,27 @@ export async function buildServer(): Promise<FastifyInstance> {
       await api.register(notificationRoutes, { prefix: "/notifications" });
       await api.register(websocketRoutes);
       api.get("/health", async () => ({ ok: true, version: config.version }));
+
+      /**
+       * "Is there an OpenNAS at this address?" — and nothing else.
+       *
+       * The finder (find-service/) has to identify OpenNAS from a browser on
+       * someone else's page, which means a cross-origin read, which means CORS.
+       * Every other route is deliberately closed to that, so this is the one
+       * exception and it is kept as thin as it can possibly be: a constant.
+       *
+       * No version, no hostname, no instance name. `/api/health` returns the
+       * version but is not cross-origin readable, and it stays that way — an
+       * unauthenticated version banner is how someone picks which exploit to
+       * try. What this does return is already shouted over mDNS to the whole
+       * LAN (`%h (OpenNAS)`), so it discloses nothing new to anyone who can
+       * reach the port at all.
+       */
+      api.get("/discover", async (_req, reply) => {
+        reply.header("Cache-Control", "no-store");
+        return { product: "opennas" };
+      });
+
     },
     { prefix: "/api" },
   );
@@ -221,6 +304,37 @@ export async function buildServer(): Promise<FastifyInstance> {
 }
 
 /**
+ * The app id an `/app-content/...` URL will actually be served from, or null
+ * when it can't be told safely - in which case the request is refused.
+ *
+ * Taking "whatever is before the first slash" is not good enough: the static
+ * handler underneath is lenient about the path in ways a naive split is not, so
+ * `/app-content//secretapp/x` split to an empty id (and skipped the check) while
+ * still serving `secretapp`. So the path is decoded segment by segment exactly
+ * once, and anything with an empty, dot or undecodable segment - or a segment
+ * that decodes to a separator - is rejected outright rather than interpreted.
+ */
+export function appContentId(rawUrl: string): string | null {
+  const q = rawUrl.search(/[?#]/);
+  const path = q === -1 ? rawUrl : rawUrl.slice(0, q);
+  if (!path.startsWith("/app-content/")) return null;
+  const segments = path.slice("/app-content/".length).split("/");
+  for (const [i, seg] of segments.entries()) {
+    // A trailing slash on a folder is the one empty segment that's harmless.
+    if (seg === "" && i === segments.length - 1 && i > 0) continue;
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(seg);
+    } catch {
+      return null;
+    }
+    if (decoded === "" || decoded === "." || decoded === ".." || /[/\\\0]/.test(decoded)) return null;
+  }
+  const id = decodeURIComponent(segments[0]!);
+  return /^[a-z0-9][a-z0-9._-]{1,63}$/.test(id) ? id : null;
+}
+
+/**
  * Serve installed third-party app content at /app-content/<id>/... These files are
  * loaded into a sandboxed iframe (opaque origin), so the iframe sandbox - not CSP
  * - is the real isolation boundary. We still send a permissive-but-bounded CSP
@@ -240,9 +354,16 @@ async function registerAppContent(app: FastifyInstance): Promise<void> {
        * check the API routes make is made here, on the id in the path.
        */
       content.addHook("preHandler", async (req, reply) => {
-        const appId = (req.raw.url ?? "").replace(/^\/app-content\//, "").split("/")[0] ?? "";
-        if (appId === "" || canUseApp(req.auth!.user, decodeURIComponent(appId))) return;
+        const appId = appContentId(req.raw.url ?? "");
+        if (appId !== null && canUseApp(req.auth!.user, appId)) return;
         return reply.code(404).send({ error: "not_found", message: "No such app file." });
+      });
+      // An app is the user's whole session in an iframe; one with setup still
+      // outstanding gets no further here than it does under /api.
+      content.addHook("preHandler", async (req, reply) => {
+        const pending = pendingActions(req.auth!.user);
+        if (pending.length === 0) return;
+        return reply.code(403).send({ error: "setup_required", message: "Finish setting up your account first.", pending });
       });
       content.addHook("onSend", async (_req, reply, payload) => {
         // The iframe runs in an OPAQUE origin (sandbox without allow-same-origin),
@@ -250,9 +371,16 @@ async function registerAppContent(app: FastifyInstance): Promise<void> {
         // can't even load the SDK (/app-sdk/opennas.js) or its own scripts. The
         // sandbox + opaque origin (not this CSP) is the isolation boundary; CSP
         // here only locks down framing so the app can't be embedded elsewhere.
+        //
+        // `sandbox` repeats the iframe's own sandbox (AppFrame.tsx, still without
+        // allow-same-origin) for when the content is *not* in that iframe: opened
+        // top-level by a link or a typed URL, it would otherwise run on the NAS
+        // origin with the session cookie and the whole API at its disposal.
+        // Inside the iframe the two are intersected, so this takes nothing away.
         reply.header(
           "Content-Security-Policy",
-          "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https: http:; frame-ancestors 'self'; base-uri 'none'",
+          "default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: https: http:; frame-ancestors 'self'; base-uri 'none'; " +
+            "sandbox allow-scripts allow-forms allow-popups allow-modals",
         );
         reply.header("X-Content-Type-Options", "nosniff");
         return payload;

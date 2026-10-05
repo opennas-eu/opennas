@@ -299,10 +299,24 @@ export function generateRuleset(config: FirewallConfig): string {
  * from claiming an address is blocked when nothing is blocking it.
  */
 
+/**
+ * Run the firewall helper. It changes the kernel's ruleset, so it needs root -
+ * which the service doesn't have - and gets it through `doas`, scoped in
+ * /etc/doas.d/opennas.conf to exactly this helper, the same way
+ * system/integration.ts runs every other privileged one. In demo mode there is
+ * no appliance firewall to touch, so nothing is run at all.
+ */
+async function firewallHelper(args: string[]): Promise<{ stdout: string }> {
+  if (appConfig.systemMode !== "linux") {
+    throw Object.assign(new Error("demo mode"), { stderr: "Only available on the installed appliance." });
+  }
+  return execFile("doas", [appConfig.firewallHelper, ...args], { timeout: 10_000 });
+}
+
 /** Ban an address at the firewall. Returns false when nothing enforced it. */
 export async function banAddress(address: string, seconds: number): Promise<{ ok: boolean; error?: string }> {
   try {
-    await execFile(appConfig.firewallHelper, ["ban", address, String(seconds)], { timeout: 10_000 });
+    await firewallHelper(["ban", address, String(seconds)]);
     return { ok: true };
   } catch (err) {
     const e = err as { stderr?: string; code?: number };
@@ -312,7 +326,7 @@ export async function banAddress(address: string, seconds: number): Promise<{ ok
 
 export async function unbanAddress(address: string): Promise<void> {
   try {
-    await execFile(appConfig.firewallHelper, ["unban", address], { timeout: 10_000 });
+    await firewallHelper(["unban", address]);
   } catch {
     // An address whose ban had already expired is not a failure - the end state
     // is the one that was asked for.
@@ -323,7 +337,7 @@ export async function unbanAddress(address: string): Promise<void> {
 export async function activeBans(): Promise<Map<string, number>> {
   const out = new Map<string, number>();
   try {
-    const { stdout } = await execFile(appConfig.firewallHelper, ["bans"], { timeout: 10_000 });
+    const { stdout } = await firewallHelper(["bans"]);
     for (const line of stdout.split("\n")) {
       const trimmed = line.trim();
       if (!trimmed) continue;
