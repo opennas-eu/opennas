@@ -5,8 +5,10 @@ import type { ServicesConfig, ServicesResponse } from "@opennas/shared";
 import { api } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { Button, Field, Input, Toggle } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
 
 export function Services() {
+  const t = useT();
   const [data, setData] = useState<ServicesResponse | null>(null);
   const [cfg, setCfg] = useState<ServicesConfig | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -35,44 +37,44 @@ export function Services() {
       setData(res);
       setCfg(res.config);
       setDirty(false);
-      push({ level: "success", title: "Services updated", body: "Configuration saved and regenerated." });
+      push({ level: "success", title: t("cp.services.updated"), body: t("cp.services.updatedBody") });
     } catch {
-      push({ level: "warning", title: "Save failed", body: "Could not update services." });
+      push({ level: "warning", title: t("cp.shares.saveFailed"), body: t("cp.services.updateFailed") });
     } finally {
       setBusy(false);
     }
   }
 
-  if (!cfg || !data) return <p className="text-sm text-ink-faint">Loading...</p>;
+  if (!cfg || !data) return <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>;
 
   return (
     <div className="space-y-5">
       <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-ink">File Services</h2>
-          <p className="text-sm text-ink-faint">Enable network protocols and review the generated configuration.</p>
+          <h2 className="text-lg font-semibold text-ink">{t("cp.fileServices")}</h2>
+          <p className="text-sm text-ink-faint">{t("cp.services.subtitle")}</p>
         </div>
-        {dirty && <Button loading={busy} onClick={save}>Apply</Button>}
+        {dirty && <Button loading={busy} onClick={save}>{t("cp.services.apply")}</Button>}
       </div>
 
       {/* SMB */}
       <ServiceCard
         title="SMB / CIFS"
-        subtitle="Windows & macOS file sharing (Samba)"
+        subtitle={t("cp.services.smbSubtitle")}
         enabled={cfg.smb.enabled}
         onToggle={(v) => patch({ smb: { ...cfg.smb, enabled: v } })}
         detected={data.daemons.smbd}
       >
         <div className="grid gap-3 sm:grid-cols-2">
-          <Field label="Workgroup">
+          <Field label={t("cp.services.workgroup")}>
             <Input value={cfg.smb.workgroup} onChange={(e) => patch({ smb: { ...cfg.smb, workgroup: e.target.value } })} />
           </Field>
-          <Field label="Server description">
+          <Field label={t("cp.services.serverDescription")}>
             <Input value={cfg.smb.serverString} onChange={(e) => patch({ smb: { ...cfg.smb, serverString: e.target.value } })} />
           </Field>
         </div>
         <label className="mt-3 flex items-center justify-between rounded-lg bg-slate-50 px-3 py-2">
-          <span className="text-sm text-ink-soft">Allow guest access to guest-enabled shares</span>
+          <span className="text-sm text-ink-soft">{t("cp.services.allowGuest")}</span>
           <Toggle checked={cfg.smb.allowGuest} onChange={(v) => patch({ smb: { ...cfg.smb, allowGuest: v } })} />
         </label>
       </ServiceCard>
@@ -80,12 +82,12 @@ export function Services() {
       {/* NFS */}
       <ServiceCard
         title="NFS"
-        subtitle="Unix & Linux file sharing"
+        subtitle={t("cp.services.nfsSubtitle")}
         enabled={cfg.nfs.enabled}
         onToggle={(v) => patch({ nfs: { ...cfg.nfs, enabled: v } })}
         detected={data.daemons.nfsd}
       >
-        <Field label="Allowed client networks" hint="Comma-separated, e.g. 192.168.1.0/24, 10.0.0.0/8. Leave blank for any.">
+        <Field label={t("cp.services.allowedNetworks")} hint={t("cp.services.allowedNetworksHint")}>
           <Input value={cfg.nfs.allowedNetworks} onChange={(e) => patch({ nfs: { ...cfg.nfs, allowedNetworks: e.target.value } })} placeholder="*" />
         </Field>
       </ServiceCard>
@@ -93,19 +95,19 @@ export function Services() {
       {/* AFP */}
       <ServiceCard
         title="AFP"
-        subtitle="Legacy Apple Filing Protocol (Netatalk)"
+        subtitle={t("cp.services.afpSubtitle")}
         enabled={cfg.afp.enabled}
         onToggle={(v) => patch({ afp: { ...cfg.afp, enabled: v } })}
         detected={data.daemons.afpd}
       >
-        <p className="text-xs text-ink-faint">Use SMB for current versions of macOS. Enable AFP only for older devices that need it.</p>
+        <p className="text-xs text-ink-faint">{t("cp.services.afpHint")}</p>
       </ServiceCard>
 
       {/* Generated config */}
       <div className="rounded-xl bg-slate-900 text-slate-100 ring-1 ring-slate-700">
         <div className="flex items-center gap-2 border-b border-slate-700 px-4 py-2.5">
           <FileCode size={16} className="text-slate-400" />
-          <span className="text-sm font-medium">Generated configuration</span>
+          <span className="text-sm font-medium">{t("cp.services.generated")}</span>
           <div className="ml-auto flex gap-1">
             <TabBtn active={tab === "smb"} onClick={() => setTab("smb")}>smb.conf</TabBtn>
             <TabBtn active={tab === "exports"} onClick={() => setTab("exports")}>exports</TabBtn>
@@ -113,10 +115,10 @@ export function Services() {
           </div>
         </div>
         <pre className="opennas-scroll max-h-72 overflow-auto px-4 py-3 text-xs leading-relaxed">
-          <code>{(tab === "smb" ? data.generated.smbConf : data.generated.exports) || "# nothing to export yet"}</code>
+          <code>{(tab === "smb" ? data.generated.smbConf : data.generated.exports) || t("cp.services.nothingYet")}</code>
         </pre>
         <p className="border-t border-slate-700 px-4 py-2 text-[11px] text-slate-400">
-          OpenNAS generates this from your shares & settings. On the NAS, point Samba/NFS at these files (or have OpenNAS write them) and reload the daemon to apply.
+          {t("cp.services.generatedHint")}
         </p>
       </div>
     </div>
@@ -126,6 +128,7 @@ export function Services() {
 function ServiceCard({ title, subtitle, enabled, onToggle, detected, children }: {
   title: string; subtitle: string; enabled: boolean; onToggle: (v: boolean) => void; detected: boolean; children: React.ReactNode;
 }) {
+  const t = useT();
   return (
     <div className="rounded-xl bg-white p-4 ring-1 ring-slate-200/70">
       <div className="flex items-center gap-3">
@@ -136,7 +139,7 @@ function ServiceCard({ title, subtitle, enabled, onToggle, detected, children }:
           <div className="flex items-center gap-2">
             <span className="font-semibold text-ink">{title}</span>
             <span className={clsx("inline-flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[10px] font-medium", detected ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-700")}>
-              {detected ? <Check size={10} /> : <X size={10} />} daemon {detected ? "detected" : "not found"}
+              {detected ? <Check size={10} /> : <X size={10} />} {detected ? t("cp.services.daemonDetected") : t("cp.services.daemonNotFound")}
             </span>
           </div>
           <div className="text-xs text-ink-faint">{subtitle}</div>
@@ -157,12 +160,13 @@ function TabBtn({ active, onClick, children }: { active: boolean; onClick: () =>
 }
 
 function CopyBtn({ text }: { text: string }) {
+  const t = useT();
   const [copied, setCopied] = useState(false);
   return (
     <button
       onClick={() => { void navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
       className="rounded px-2 py-1 text-xs text-slate-400 transition hover:text-slate-200"
-      title="Copy"
+      title={t("cp.services.copy")}
     >
       {copied ? <Check size={14} /> : <Copy size={14} />}
     </button>

@@ -10,6 +10,7 @@ import { useIntents } from "../../store/intents.ts";
 import { SETTINGS_INDEX } from "../../lib/settings-index.ts";
 import { AppIcon } from "../ui/Icon.tsx";
 import { formatBytes } from "../../lib/format.ts";
+import { translate, useT, type MessageKey } from "../../i18n/index.ts";
 
 /**
  * Search across apps, settings and files.
@@ -26,13 +27,14 @@ type Result =
   | { kind: "setting"; id: string; title: string; subtitle: string; section: string }
   | { kind: "file"; id: string; title: string; subtitle: string; hit: FileSearchHit };
 
-const GROUP_LABEL: Record<Result["kind"], string> = {
-  app: "Apps",
-  setting: "Settings",
-  file: "Files",
+const GROUP_LABEL: Record<Result["kind"], MessageKey> = {
+  app: "desktop.apps",
+  setting: "ui.search.settings",
+  file: "ui.search.files",
 };
 
 export function GlobalSearch({ onClose }: { onClose: () => void }) {
+  const t = useT();
   const apps = useApps((s) => s.apps);
   const isAdmin = useAuth((s) => s.session?.user.role === "admin");
   const openApp = useWindows((s) => s.openApp);
@@ -52,14 +54,14 @@ export function GlobalSearch({ onClose }: { onClose: () => void }) {
     const q = query.trim();
     if (q.length < 2) { setFiles(null); setSearching(false); return; }
     setSearching(true);
-    const t = setTimeout(() => {
+    const timer = setTimeout(() => {
       void api
         .get<FileSearchResponse>(`/files/search?q=${encodeURIComponent(q)}`)
         .then(setFiles)
         .catch(() => setFiles(null))
         .finally(() => setSearching(false));
     }, 220);
-    return () => { clearTimeout(t); setSearching(false); };
+    return () => { clearTimeout(timer); setSearching(false); };
   }, [query]);
 
   const results = useMemo<Result[]>(() => {
@@ -70,14 +72,18 @@ export function GlobalSearch({ onClose }: { onClose: () => void }) {
     for (const app of apps) {
       const haystack = `${app.name} ${app.description} ${app.category}`.toLowerCase();
       if (haystack.includes(q)) {
-        out.push({ kind: "app", id: `app:${app.id}`, title: app.name, subtitle: app.description || "App", appId: app.id });
+        out.push({ kind: "app", id: `app:${app.id}`, title: app.name, subtitle: app.description || t("ui.search.app"), appId: app.id });
       }
     }
     for (const entry of SETTINGS_INDEX) {
       if (entry.adminOnly && !isAdmin) continue;
-      const haystack = `${entry.label} ${entry.description} ${entry.keywords.join(" ")}`.toLowerCase();
+      const label = t(entry.label);
+      const description = t(entry.description);
+      // English too, so the words in the keyword list keep working in any language.
+      const english = `${translate("en", entry.label)} ${translate("en", entry.description)}`;
+      const haystack = `${label} ${description} ${english} ${entry.keywords.join(" ")}`.toLowerCase();
       if (haystack.includes(q)) {
-        out.push({ kind: "setting", id: `set:${entry.section}`, title: entry.label, subtitle: entry.description, section: entry.section });
+        out.push({ kind: "setting", id: `set:${entry.section}`, title: label, subtitle: description, section: entry.section });
       }
     }
     for (const hit of files?.hits ?? []) {
@@ -90,7 +96,7 @@ export function GlobalSearch({ onClose }: { onClose: () => void }) {
       });
     }
     return out;
-  }, [query, apps, isAdmin, files]);
+  }, [query, apps, isAdmin, files, t]);
 
   // Any change to the result set invalidates the highlighted row.
   useEffect(() => { setActive(0); }, [query, files]);
@@ -144,9 +150,9 @@ export function GlobalSearch({ onClose }: { onClose: () => void }) {
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search apps, settings and files..."
+            placeholder={t("ui.search.placeholder")}
             className="h-14 flex-1 bg-transparent text-base text-ink outline-none placeholder:text-slate-400"
-            aria-label="Search"
+            aria-label={t("desktop.search")}
           />
           <kbd className="hidden shrink-0 rounded border border-slate-200 px-1.5 py-0.5 text-[10px] text-ink-faint sm:block">Esc</kbd>
         </div>
@@ -154,15 +160,15 @@ export function GlobalSearch({ onClose }: { onClose: () => void }) {
         <div ref={listRef} className="opennas-scroll min-h-0 flex-1 overflow-auto py-1">
           {query.trim() === "" ? (
             <p className="px-4 py-8 text-center text-sm text-ink-faint">
-              Start typing to find an app, a setting or a file.
+              {t("ui.search.hint")}
             </p>
           ) : results.length === 0 ? (
             <p className="px-4 py-8 text-center text-sm text-ink-faint">
-              {searching ? "Searching..." : "Nothing matches."}
+              {searching ? t("ui.search.searching") : t("ui.search.noResults")}
             </p>
           ) : (
             results.map((r, i) => {
-              const header = r.kind !== lastKind ? GROUP_LABEL[r.kind] : null;
+              const header = r.kind !== lastKind ? t(GROUP_LABEL[r.kind]) : null;
               lastKind = r.kind;
               const app = r.kind === "app" ? apps.find((a) => a.id === r.appId) : undefined;
               return (
@@ -205,15 +211,15 @@ export function GlobalSearch({ onClose }: { onClose: () => void }) {
 
           {files?.truncated && (
             <p className="px-4 py-2 text-center text-[11px] text-ink-faint">
-              Showing the first matches. Refine your search to find other results.
+              {t("ui.search.truncated")}
             </p>
           )}
         </div>
 
         <div className="flex items-center gap-3 border-t border-slate-200 px-4 py-2 text-[11px] text-ink-faint">
-          <span className="flex items-center gap-1"><Settings2 size={12} /> ↑↓ to move</span>
-          <span className="flex items-center gap-1"><CornerDownLeft size={12} /> to open</span>
-          {searching && <span className="ml-auto">Searching files...</span>}
+          <span className="flex items-center gap-1"><Settings2 size={12} /> {t("ui.search.move")}</span>
+          <span className="flex items-center gap-1"><CornerDownLeft size={12} /> {t("ui.search.open")}</span>
+          {searching && <span className="ml-auto">{t("ui.search.searchingFiles")}</span>}
         </div>
       </div>
     </div>

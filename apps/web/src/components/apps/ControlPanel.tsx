@@ -58,6 +58,7 @@ import { useT } from "../../i18n/index.ts";
 import { Firewall } from "./control-panel/Firewall.tsx";
 import { ChangePasswordPanel, TwoFactorPanel } from "./control-panel/AccountSecurity.tsx";
 import { AppFolderAccess } from "./control-panel/AppFolderAccess.tsx";
+import { fillElements } from "./control-panel/fillElements.tsx";
 
 type Section =
   | "account"
@@ -218,6 +219,7 @@ function SectionTitle({ title, subtitle }: { title: string; subtitle: string }) 
 }
 
 function AccountSection() {
+  const t = useT();
   const session = useAuth((s) => s.session);
   const setUser = useAuth((s) => s.setUser);
   const logout = useAuth((s) => s.logout);
@@ -235,10 +237,10 @@ function AccountSection() {
     try {
       const res = await fetch(apiUrl("/auth/me/avatar"), { method: "POST", body: fd, credentials: "include" });
       const data = await res.json().catch(() => null);
-      if (!res.ok) throw new Error(data?.message ?? "Upload failed.");
+      if (!res.ok) throw new Error(data?.message ?? t("cp.account.uploadFailed"));
       if (data?.user) setUser(data.user as User);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not update your picture.");
+      setError(err instanceof Error ? err.message : t("cp.account.pictureFailed"));
     } finally {
       setBusy(false);
     }
@@ -251,7 +253,7 @@ function AccountSection() {
       const { user: updated } = await api.del<{ user: User }>("/auth/me/avatar");
       setUser(updated);
     } catch {
-      setError("Could not remove your picture.");
+      setError(t("cp.account.removePictureFailed"));
     } finally {
       setBusy(false);
     }
@@ -259,7 +261,7 @@ function AccountSection() {
 
   return (
     <div>
-      <SectionTitle title="Account" subtitle="Your profile and sign-in details." />
+      <SectionTitle title={t("cp.account")} subtitle={t("cp.accountSubtitle")} />
       <div className="flex items-center gap-4 rounded-xl bg-slate-50 p-5 ring-1 ring-slate-200/70">
         <div className="group relative">
           <Avatar user={user} className="h-16 w-16 text-xl" />
@@ -267,8 +269,8 @@ function AccountSection() {
             type="button"
             onClick={() => fileInput.current?.click()}
             disabled={busy}
-            title="Change profile picture"
-            aria-label="Change profile picture"
+            title={t("cp.account.changePictureLabel")}
+            aria-label={t("cp.account.changePictureLabel")}
             className="absolute inset-0 grid place-items-center rounded-full bg-black/45 text-white opacity-0 transition group-hover:opacity-100 disabled:opacity-0"
           >
             <Camera size={18} />
@@ -285,19 +287,19 @@ function AccountSection() {
           <div className="text-lg font-semibold text-ink">{user.displayName}</div>
           <div className="text-sm text-ink-faint">@{user.username}</div>
           <div className="mt-1.5 flex flex-wrap items-center gap-2">
-            <Tag>{user.role === "admin" ? "Administrator" : "User"}</Tag>
-            <Tag>{user.source === "local" ? "Local account" : "SSO account"}</Tag>
+            <Tag>{user.role === "admin" ? t("cp.account.admin") : t("cp.account.user")}</Tag>
+            <Tag>{user.source === "local" ? t("cp.account.local") : t("cp.account.sso")}</Tag>
             <button
               type="button"
               onClick={() => fileInput.current?.click()}
               disabled={busy}
               className="text-xs font-medium text-brand-600 hover:underline disabled:opacity-50"
             >
-              {user.avatarUrl ? "Change picture" : "Add picture"}
+              {user.avatarUrl ? t("cp.account.changePicture") : t("cp.account.addPicture")}
             </button>
             {user.avatarUrl && (
               <button type="button" onClick={() => void removeAvatar()} disabled={busy} className="text-xs font-medium text-rose-600 hover:underline disabled:opacity-50">
-                Remove
+                {t("common.remove")}
               </button>
             )}
           </div>
@@ -306,14 +308,14 @@ function AccountSection() {
       </div>
 
       <dl className="mt-4 divide-y divide-slate-100 rounded-xl ring-1 ring-slate-200/70">
-        <Row label="Email" value={user.email ?? "-"} />
-        <Row label="Member since" value={new Date(user.createdAt).toLocaleDateString()} />
-        <Row label="This session" value={session.authMethods.join(", ") || "-"} />
+        <Row label={t("cp.email")} value={user.email ?? "-"} />
+        <Row label={t("cp.account.memberSince")} value={new Date(user.createdAt).toLocaleDateString()} />
+        <Row label={t("cp.account.thisSession")} value={session.authMethods.join(", ") || "-"} />
       </dl>
 
       <div className="mt-6">
         <Button variant="secondary" onClick={() => void logout()}>
-          Sign out
+          {t("auth.signOut")}
         </Button>
       </div>
     </div>
@@ -321,6 +323,7 @@ function AccountSection() {
 }
 
 function SecuritySection() {
+  const t = useT();
   const [passkeys, setPasskeys] = useState<PasskeySummary[] | null>(null);
   const [adding, setAdding] = useState(false);
   const [label, setLabel] = useState("");
@@ -339,14 +342,14 @@ function SecuritySection() {
     setError(null);
     setAdding(true);
     try {
-      await registerPasskey(label.trim() || "Passkey");
+      await registerPasskey(label.trim() || t("cp.security.defaultPasskeyName"));
       setLabel("");
       setShowAdd(false);
       await load();
     } catch (err) {
       if (err instanceof ApiRequestError) setError(err.message);
-      else if (err instanceof DOMException && err.name === "NotAllowedError") setError("Registration was cancelled.");
-      else setError("Could not add passkey.");
+      else if (err instanceof DOMException && err.name === "NotAllowedError") setError(t("cp.security.cancelled"));
+      else setError(t("cp.security.addFailed"));
     } finally {
       setAdding(false);
     }
@@ -359,35 +362,35 @@ function SecuritySection() {
 
   return (
     <div>
-      <SectionTitle title="Security" subtitle="Passkeys, two-factor codes, your password, and the devices you're signed in on." />
+      <SectionTitle title={t("cp.security")} subtitle={t("cp.security.subtitle")} />
 
       {!passkeysSupported && (
         <p className="mb-4 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700 ring-1 ring-amber-200">
-          This browser doesn't support passkeys.
+          {t("cp.security.unsupported")}
         </p>
       )}
 
       <div className="mb-4 flex items-center justify-between">
         <h3 className="flex items-center gap-2 text-sm font-semibold text-ink-soft">
-          <Fingerprint size={16} /> Your passkeys
+          <Fingerprint size={16} /> {t("cp.security.yourPasskeys")}
         </h3>
         {passkeysSupported && !showAdd && (
           <Button className="h-8 px-3 py-0 text-xs" onClick={() => setShowAdd(true)}>
-            <Plus size={14} /> Add passkey
+            <Plus size={14} /> {t("cp.security.addPasskey")}
           </Button>
         )}
       </div>
 
       {showAdd && (
         <div className="mb-4 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
-          <label className="mb-1.5 block text-sm font-medium text-ink-soft">Passkey name</label>
+          <label className="mb-1.5 block text-sm font-medium text-ink-soft">{t("cp.security.passkeyName")}</label>
           <div className="flex gap-2">
-            <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="e.g. MacBook Touch ID" />
+            <Input value={label} onChange={(e) => setLabel(e.target.value)} placeholder={t("cp.security.passkeyPlaceholder")} />
             <Button loading={adding} onClick={add} className="shrink-0">
-              Create
+              {t("common.create")}
             </Button>
             <Button variant="ghost" onClick={() => { setShowAdd(false); setError(null); }} className="shrink-0">
-              Cancel
+              {t("common.cancel")}
             </Button>
           </div>
           {error && <p className="mt-2 text-sm text-rose-600">{error}</p>}
@@ -395,10 +398,10 @@ function SecuritySection() {
       )}
 
       <div className="space-y-2">
-        {passkeys === null && <p className="text-sm text-ink-faint">Loading...</p>}
+        {passkeys === null && <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>}
         {passkeys?.length === 0 && (
           <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-ink-faint">
-            No passkeys yet. Add one for faster, phishing-resistant sign-in.
+            {t("cp.security.noPasskeys")}
           </div>
         )}
         {passkeys?.map((pk) => (
@@ -410,12 +413,12 @@ function SecuritySection() {
               <div className="truncate text-sm font-medium text-ink-soft">{pk.label}</div>
               <div className="text-xs text-ink-faint">
                 {pk.deviceType}
-                {pk.backedUp ? " - synced" : ""} - added {formatRelative(pk.createdAt)}
-                {pk.lastUsedAt ? ` - last used ${formatRelative(pk.lastUsedAt)}` : ""}
+                {pk.backedUp ? ` - ${t("cp.security.synced")}` : ""} - {t("cp.security.added", { when: formatRelative(pk.createdAt) })}
+                {pk.lastUsedAt ? ` - ${t("cp.security.lastUsed", { when: formatRelative(pk.lastUsedAt) })}` : ""}
               </div>
             </div>
             <button
-              aria-label="Remove passkey"
+              aria-label={t("cp.security.removePasskey")}
               onClick={() => void remove(pk.id)}
               className="grid h-8 w-8 place-items-center rounded-lg text-ink-faint transition-colors hover:bg-rose-500 hover:text-white"
             >
@@ -438,6 +441,7 @@ function SecuritySection() {
  * server-side records, so revoking one takes effect on that device's next request.
  */
 function SessionsPanel() {
+  const t = useT();
   const push = useNotifications((s) => s.push);
   const signOut = useAuth((s) => s.logout);
   const [sessions, setSessions] = useState<SessionSummary[] | null>(null);
@@ -455,9 +459,9 @@ function SessionsPanel() {
   async function revoke(s: SessionSummary) {
     if (s.current) {
       const ok = await confirmDialog({
-        title: "Sign out of this device?",
-        message: "You'll be returned to the login screen.",
-        confirmLabel: "Sign out",
+        title: t("cp.sessions.signOutThisConfirm"),
+        message: t("cp.sessions.signOutThisMessage"),
+        confirmLabel: t("auth.signOut"),
         danger: true,
       });
       if (!ok) return;
@@ -467,10 +471,10 @@ function SessionsPanel() {
     setBusy(s.id);
     try {
       await api.del(`/auth/sessions/${encodeURIComponent(s.id)}`);
-      push({ level: "success", title: "Device signed out", body: s.device });
+      push({ level: "success", title: t("cp.sessions.signedOut"), body: s.device });
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't sign out that device", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.sessions.signOutFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     } finally {
       setBusy(null);
     }
@@ -478,9 +482,9 @@ function SessionsPanel() {
 
   async function revokeOthers() {
     const ok = await confirmDialog({
-      title: "Sign out everywhere else?",
-      message: "Every other browser and device will have to sign in again. This one stays signed in.",
-      confirmLabel: "Sign out others",
+      title: t("cp.sessions.othersConfirm"),
+      message: t("cp.sessions.othersMessage"),
+      confirmLabel: t("cp.sessions.signOutOthers"),
       danger: true,
     });
     if (!ok) return;
@@ -489,11 +493,11 @@ function SessionsPanel() {
       const res = await api.post<{ revoked: number }>("/auth/sessions/revoke-others", {});
       push({
         level: "success",
-        title: res.revoked === 0 ? "No other devices were signed in" : `Signed out ${res.revoked} device${res.revoked === 1 ? "" : "s"}`,
+        title: res.revoked === 0 ? t("cp.sessions.noOthers") : t("cp.sessions.revoked", { count: res.revoked }),
       });
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't sign out other devices", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.sessions.othersFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     } finally {
       setBusy(null);
     }
@@ -505,20 +509,20 @@ function SessionsPanel() {
     <div className="mt-8">
       <div className="mb-4 flex items-center justify-between">
         <h3 className="flex items-center gap-2 text-sm font-semibold text-ink-soft">
-          <Laptop size={16} /> Signed-in devices
+          <Laptop size={16} /> {t("cp.sessions.title")}
         </h3>
         {others > 0 && (
           <Button variant="secondary" className="h-8 px-3 py-0 text-xs" loading={busy === "others"} onClick={revokeOthers}>
-            <LogOut size={14} /> Sign out others
+            <LogOut size={14} /> {t("cp.sessions.signOutOthers")}
           </Button>
         )}
       </div>
 
       <div className="space-y-2">
-        {sessions === null && <p className="text-sm text-ink-faint">Loading...</p>}
+        {sessions === null && <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>}
         {sessions?.length === 0 && (
           <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-ink-faint">
-            No active sessions found.
+            {t("cp.sessions.empty")}
           </div>
         )}
         {sessions?.map((s) => (
@@ -530,17 +534,17 @@ function SessionsPanel() {
               <div className="flex items-center gap-2">
                 <span className="truncate text-sm font-medium text-ink-soft">{s.device}</span>
                 {s.current && (
-                  <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">This device</span>
+                  <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700">{t("cp.sessions.thisDevice")}</span>
                 )}
               </div>
               <div className="truncate text-xs text-ink-faint">
-                {s.ip ? `${s.ip} - ` : ""}signed in {formatRelative(s.createdAt)}
+                {s.ip ? `${s.ip} - ` : ""}{t("cp.sessions.signedIn", { when: formatRelative(s.createdAt) })}
                 {s.authMethods.length > 0 ? ` - ${s.authMethods.join(", ")}` : ""}
               </div>
             </div>
             <button
-              aria-label={s.current ? "Sign out of this device" : `Sign out ${s.device}`}
-              title={s.current ? "Sign out of this device" : "Sign out this device"}
+              aria-label={s.current ? t("cp.sessions.signOutThis") : t("cp.sessions.signOutNamed", { device: s.device })}
+              title={s.current ? t("cp.sessions.signOutThis") : t("cp.sessions.signOutDevice")}
               disabled={busy === s.id}
               onClick={() => void revoke(s)}
               className="grid h-8 w-8 place-items-center rounded-lg text-ink-faint transition-colors hover:bg-rose-500 hover:text-white disabled:opacity-50"
@@ -555,11 +559,12 @@ function SessionsPanel() {
 }
 
 function ConnectivitySection() {
+  const t = useT();
   const bootstrap = useAuth((s) => s.bootstrap);
   const oidc = bootstrap?.oidc;
   return (
     <div>
-      <SectionTitle title="SSO & Access" subtitle="Single sign-on lets you log in with your existing identity provider." />
+      <SectionTitle title={t("cp.sso")} subtitle={t("cp.sso.subtitle")} />
       <div className="rounded-xl bg-slate-50 p-5 ring-1 ring-slate-200/70">
         <div className="flex items-center gap-3">
           <span className={`grid h-11 w-11 place-items-center rounded-xl text-white ${oidc?.enabled ? "bg-emerald-500" : "bg-slate-400"}`}>
@@ -568,26 +573,29 @@ function ConnectivitySection() {
           <div>
             <div className="font-semibold text-ink">OpenID Connect (OIDC)</div>
             <div className="text-sm text-ink-faint">
-              {oidc?.enabled ? `Enabled - "${oidc.buttonLabel}" shown on login` : "Not configured"}
+              {oidc?.enabled ? t("cp.sso.enabledShown", { label: oidc.buttonLabel }) : t("cp.sso.notConfigured")}
             </div>
           </div>
           <span className={`ml-auto rounded-full px-2.5 py-1 text-xs font-medium ${oidc?.enabled ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-ink-faint"}`}>
-            {oidc?.enabled ? "Active" : "Off"}
+            {oidc?.enabled ? t("cp.sso.active") : t("cp.sso.off")}
           </span>
         </div>
 
         {!oidc?.enabled && (
           <div className="mt-4 rounded-lg bg-white p-4 text-sm text-ink-faint ring-1 ring-slate-200">
-            <p className="mb-2 font-medium text-ink-soft">To connect your SSO (Authentik, Keycloak, Authelia...):</p>
+            <p className="mb-2 font-medium text-ink-soft">{t("cp.sso.howTo")}</p>
             <ol className="list-decimal space-y-1 pl-5">
-              <li>Register OpenNAS as an OIDC client in your IdP.</li>
+              <li>{t("cp.sso.step1")}</li>
               <li>
-                Set the redirect URI to{" "}
-                <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">{location.origin}/api/auth/oidc/callback</code>
+                {fillElements(t("cp.sso.step2"), {
+                  uri: <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">{location.origin}/api/auth/oidc/callback</code>,
+                })}
               </li>
               <li>
-                Provide <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">OPENNAS_OIDC_ISSUER</code>,{" "}
-                <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">OPENNAS_OIDC_CLIENT_ID</code> and secret, then restart.
+                {fillElements(t("cp.sso.step3"), {
+                  issuer: <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">OPENNAS_OIDC_ISSUER</code>,
+                  clientId: <code className="rounded bg-slate-100 px-1 py-0.5 text-xs">OPENNAS_OIDC_CLIENT_ID</code>,
+                })}
               </li>
             </ol>
           </div>

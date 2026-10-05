@@ -10,8 +10,10 @@ import { ShareQuota } from "./ShareQuota.tsx";
 import { NfsRules } from "./NfsRules.tsx";
 import { Button, Field, Input, Select, Toggle } from "../../ui/controls.tsx";
 import { FolderRules } from "./FolderRules.tsx";
+import { useT } from "../../../i18n/index.ts";
 
 export function SharedFolders() {
+  const t = useT();
   const [shares, setShares] = useState<Share[] | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -40,16 +42,16 @@ export function SharedFolders() {
 
   async function remove(share: Share) {
     if (!(await confirmDialog({
-      title: `Remove the "${share.name}" share?`,
-      message: "Removes the share definition. The folder and its files stay on disk.",
-      confirmLabel: "Remove share",
+      title: t("cp.shares.removeTitle", { name: share.name }),
+      message: t("cp.shares.removeMessage"),
+      confirmLabel: t("cp.shares.removeShare"),
       danger: true,
     }))) return;
     try {
       await api.del(`/admin/shares/${share.id}`);
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't remove share", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.shares.removeFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
@@ -57,23 +59,23 @@ export function SharedFolders() {
     <div>
       <div className="mb-5 flex items-start justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-ink">Shared Folders</h2>
+          <h2 className="text-lg font-semibold text-ink">{t("shares.title")}</h2>
           <p className="text-sm text-ink-faint">
-            Folders exposed to users and over SMB/NFS, with per-user and per-group permissions and folder-level rules.
+            {t("cp.shares.subtitle")}
           </p>
         </div>
         <Button className="h-9" onClick={() => setShowCreate((s) => !s)}>
-          <FolderPlus size={16} /> Create
+          <FolderPlus size={16} /> {t("common.create")}
         </Button>
       </div>
 
       {showCreate && <CreateShareForm onDone={async () => { setShowCreate(false); await load(); }} />}
 
       <div className="space-y-2">
-        {shares === null && <p className="text-sm text-ink-faint">Loading...</p>}
+        {shares === null && <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>}
         {shares?.length === 0 && !showCreate && (
           <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-ink-faint">
-            No shared folders yet. Create one to grant users access and expose it over SMB/NFS.
+            {t("cp.shares.empty")}
           </div>
         )}
         {shares?.map((share) => (
@@ -88,14 +90,14 @@ export function SharedFolders() {
                   {share.smbEnabled && <Badge icon={<Network size={11} />}>SMB</Badge>}
                   {share.nfsEnabled && <Badge icon={<Network size={11} />}>NFS</Badge>}
                   {share.volume && <Badge icon={<HardDrive size={11} />}>{share.volume}</Badge>}
-                  {share.guestAccess !== "none" && <Badge icon={<Globe size={11} />}>guest {share.guestAccess}</Badge>}
+                  {share.guestAccess !== "none" && <Badge icon={<Globe size={11} />}>{t("cp.shares.guestBadge", { level: share.guestAccess })}</Badge>}
                   {share.groupPermissions.length > 0 && (
                     <Badge icon={<UsersIcon size={11} />}>
-                      {share.groupPermissions.length} group{share.groupPermissions.length === 1 ? "" : "s"}
+                      {t("cp.shares.groupCount", { count: share.groupPermissions.length })}
                     </Badge>
                   )}
-                  {share.recycleEnabled && <Badge icon={<RotateCcw size={11} />}>recycle</Badge>}
-                  {share.timeMachineEnabled && <Badge icon={<Clock size={11} />}>time machine</Badge>}
+                  {share.recycleEnabled && <Badge icon={<RotateCcw size={11} />}>{t("cp.shares.recycleBadge")}</Badge>}
+                  {share.timeMachineEnabled && <Badge icon={<Clock size={11} />}>{t("cp.shares.timeMachineBadge")}</Badge>}
                   {share.quotaBytes > 0 && (
                     <Badge icon={<Gauge size={11} />}>
                       {share.quotaUsedBytes != null ? `${formatBytes(share.quotaUsedBytes)} / ` : ""}
@@ -104,7 +106,7 @@ export function SharedFolders() {
                   )}
                 </div>
                 <div className="text-xs text-ink-faint">
-                          {share.comment || "No description"} - {share.permissions.length} user{share.permissions.length === 1 ? "" : "s"}
+                          {share.comment || t("cp.shares.noDescription")} - {t("cp.shares.userCount", { count: share.permissions.length })}
                   {share.sizeBytes != null ? ` - ${formatBytes(share.sizeBytes)}` : ""}
                 </div>
               </div>
@@ -156,6 +158,7 @@ function ShareEditor({
   });
   const [busy, setBusy] = useState(false);
   const push = useNotifications((s) => s.push);
+  const t = useT();
 
   async function save() {
     setBusy(true);
@@ -165,10 +168,10 @@ function ShareEditor({
         permissions: Object.entries(perms).filter(([, l]) => l !== "none").map(([userId, level]) => ({ userId, level })),
         groupPermissions: Object.entries(groupPerms).filter(([, l]) => l !== "none").map(([groupId, level]) => ({ groupId, level })),
       });
-      push({ level: "success", title: "Share saved", body: `"${share.name}" updated.` });
+      push({ level: "success", title: t("cp.shares.saved"), body: t("cp.shares.savedBody", { name: share.name }) });
       await onSaved();
     } catch (err) {
-      push({ level: "warning", title: "Save failed", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.shares.saveFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     } finally {
       setBusy(false);
     }
@@ -176,31 +179,31 @@ function ShareEditor({
 
   return (
     <div className="space-y-4 border-t border-slate-200 bg-white p-4">
-      <Field label="Description">
-        <Input value={comment} onChange={(e) => setComment(e.target.value)} placeholder="What's this folder for?" />
+      <Field label={t("common.description")}>
+        <Input value={comment} onChange={(e) => setComment(e.target.value)} placeholder={t("cp.shares.descriptionPlaceholder")} />
       </Field>
 
       <div className="grid gap-4 sm:grid-cols-2">
-        <ToggleRow label="Share over SMB" hint="Windows/macOS file sharing" checked={smbEnabled} onChange={setSmb} />
-        <ToggleRow label="Share over NFS" hint="Unix/Linux file sharing" checked={nfsEnabled} onChange={setNfs} />
-        <ToggleRow label="Browseable" hint="Visible when browsing the network" checked={browseable} onChange={setBrowseable} />
+        <ToggleRow label={t("shares.smb")} hint={t("shares.smbHint")} checked={smbEnabled} onChange={setSmb} />
+        <ToggleRow label={t("shares.nfs")} hint={t("shares.nfsHint")} checked={nfsEnabled} onChange={setNfs} />
+        <ToggleRow label={t("shares.browseable")} hint={t("shares.browseableHint")} checked={browseable} onChange={setBrowseable} />
         <ToggleRow
-          label="Recycle bin over SMB"
-          hint="A delete from Windows or macOS moves the file aside instead of destroying it"
+          label={t("shares.recycle")}
+          hint={t("cp.shares.recycleHint")}
           checked={recycleEnabled}
           onChange={setRecycle}
         />
         <ToggleRow
-          label="Time Machine backups"
-          hint="Offer this folder to macOS as a backup destination"
+          label={t("shares.timeMachine")}
+          hint={t("shares.timeMachineHint")}
           checked={timeMachineEnabled}
           onChange={setTimeMachine}
         />
-        <Field label="Guest access">
+        <Field label={t("shares.guestAccess")}>
           <Select value={guestAccess} onChange={(e) => setGuestAccess(e.target.value as AccessLevel)} className="w-full">
-            <option value="none">No guest access</option>
-            <option value="ro">Read only</option>
-            <option value="rw">Read &amp; write</option>
+            <option value="none">{t("shares.noGuestAccess")}</option>
+            <option value="ro">{t("common.readOnly")}</option>
+            <option value="rw">{t("common.readWrite")}</option>
           </Select>
         </Field>
       </div>
@@ -210,8 +213,8 @@ function ShareEditor({
           <Info size={13} className="mt-0.5 shrink-0" />
           <span>
             {!smbEnabled
-              ? "Time Machine works over SMB, so this folder needs SMB sharing switched on before macOS can use it."
-              : "Time Machine requires authenticated access. Set guest access to 'No guest access' to enable backups."}
+              ? t("cp.shares.tmNeedsSmb")
+              : t("cp.shares.tmNeedsAuth")}
           </span>
         </p>
       )}
@@ -219,18 +222,16 @@ function ShareEditor({
         <p className="flex items-start gap-2 rounded-lg bg-slate-50 px-3 py-2 text-xs text-ink-faint ring-1 ring-slate-200/70">
           <Info size={13} className="mt-0.5 shrink-0" />
           <span>
-            With no size limit, Time Machine will fill the whole volume - and every other share on it. Set a limit so
-            macOS clears out old backups instead.
+            {t("cp.shares.tmNoLimit")}
           </span>
         </p>
       )}
 
       {groups.length > 0 && (
         <div>
-          <h4 className="mb-2 text-sm font-semibold text-ink-soft">Group permissions</h4>
+          <h4 className="mb-2 text-sm font-semibold text-ink-soft">{t("cp.shares.groupPermissions")}</h4>
           <p className="mb-2 text-xs text-ink-faint">
-            Everyone in the group gets this. Where a person's own permission and their groups' disagree, the most
-            permissive wins.
+            {t("cp.shares.groupPermissionsHint")}
           </p>
           <div className="space-y-1.5">
             {groups.map((g) => (
@@ -239,16 +240,16 @@ function ShareEditor({
                   <UsersIcon size={12} />
                 </span>
                 <span className="flex-1 truncate text-sm text-ink-soft">
-                  {g.name} <span className="text-ink-faint">- {g.memberCount} member{g.memberCount === 1 ? "" : "s"}</span>
+                  {g.name} <span className="text-ink-faint">- {t("cp.shares.memberCount", { count: g.memberCount })}</span>
                 </span>
                 <Select
                   value={groupPerms[g.id] ?? "none"}
                   onChange={(e) => setGroupPerms((m) => ({ ...m, [g.id]: e.target.value as AccessLevel }))}
                   className="h-8 py-0 text-xs"
                 >
-                  <option value="none">No access</option>
-                  <option value="ro">Read only</option>
-                  <option value="rw">Read &amp; write</option>
+                  <option value="none">{t("cp.shares.noAccess")}</option>
+                  <option value="ro">{t("common.readOnly")}</option>
+                  <option value="rw">{t("common.readWrite")}</option>
                 </Select>
               </div>
             ))}
@@ -257,7 +258,7 @@ function ShareEditor({
       )}
 
       <div>
-        <h4 className="mb-2 text-sm font-semibold text-ink-soft">User permissions</h4>
+        <h4 className="mb-2 text-sm font-semibold text-ink-soft">{t("cp.shares.userPermissions")}</h4>
         <div className="space-y-1.5">
           {users.map((u) => (
             <div key={u.id} className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-1.5">
@@ -270,9 +271,9 @@ function ShareEditor({
                 onChange={(e) => setPerms((m) => ({ ...m, [u.id]: e.target.value as AccessLevel }))}
                 className="h-8 py-0 text-xs"
               >
-                <option value="none">No access</option>
-                <option value="ro">Read only</option>
-                <option value="rw">Read &amp; write</option>
+                <option value="none">{t("cp.shares.noAccess")}</option>
+                <option value="ro">{t("common.readOnly")}</option>
+                <option value="rw">{t("common.readWrite")}</option>
               </Select>
             </div>
           ))}
@@ -289,9 +290,9 @@ function ShareEditor({
 
       <div className="flex items-center justify-between">
         <Button variant="ghost" className="text-rose-600 hover:bg-rose-50" onClick={onDelete}>
-          <Trash2 size={16} /> Remove share
+          <Trash2 size={16} /> {t("cp.shares.removeShare")}
         </Button>
-        <Button loading={busy} onClick={save}>Save changes</Button>
+        <Button loading={busy} onClick={save}>{t("common.saveChanges")}</Button>
       </div>
     </div>
   );
@@ -306,6 +307,7 @@ function CreateShareForm({ onDone }: { onDone: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const push = useNotifications((s) => s.push);
+  const t = useT();
 
   // Load the data volumes the share can be placed on.
   useEffect(() => {
@@ -322,10 +324,10 @@ function CreateShareForm({ onDone }: { onDone: () => void }) {
     try {
       // Only send `volume` when a real volume is picked (omit for default root).
       await api.post("/admin/shares", { name, comment, smbEnabled, ...(volume ? { volume } : {}) });
-      push({ level: "success", title: "Share created", body: `"${name}" is ready. Set permissions to grant access.` });
+      push({ level: "success", title: t("cp.shares.created"), body: t("cp.shares.createdBody", { name }) });
       onDone();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Failed to create share.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.shares.createFailed"));
     } finally {
       setBusy(false);
     }
@@ -334,36 +336,36 @@ function CreateShareForm({ onDone }: { onDone: () => void }) {
   return (
     <form onSubmit={submit} className="mb-4 space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Folder name" hint="Created under the chosen location">
-          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Media" autoFocus />
+        <Field label={t("cp.shares.folderName")} hint={t("cp.shares.folderNameHint")}>
+          <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("cp.shares.folderNameExample")} autoFocus />
         </Field>
-        <Field label="Description (optional)">
-          <Input value={comment} onChange={(e) => setComment(e.target.value)} placeholder="Movies & shows" />
+        <Field label={t("cp.shares.descriptionOptional")}>
+          <Input value={comment} onChange={(e) => setComment(e.target.value)} placeholder={t("cp.shares.descriptionExample")} />
         </Field>
       </div>
       <Field
-        label="Location"
+        label={t("cp.shares.location")}
         hint={
           volumes.length
-            ? "Which storage volume this share's files live on"
-            : "No data volumes found - using the default share root. Add one in Storage."
+            ? t("cp.shares.locationHint")
+            : t("cp.shares.noVolumes")
         }
       >
         <Select value={volume} onChange={(e) => setVolume(e.target.value)} className="w-full" disabled={volumes.length === 0}>
-          <option value="">Default location (system volume)</option>
+          <option value="">{t("cp.shares.defaultLocation")}</option>
           {volumes.map((v) => (
             <option key={v.label} value={v.label}>
               {v.label}
-              {v.freeBytes != null ? ` - ${formatBytes(v.freeBytes)} free` : ""}
+              {v.freeBytes != null ? ` - ${t("cp.shares.free", { size: formatBytes(v.freeBytes) })}` : ""}
             </option>
           ))}
         </Select>
       </Field>
-      <ToggleRow label="Share over SMB now" hint="You can change this and add NFS after creating" checked={smbEnabled} onChange={setSmb} />
+      <ToggleRow label={t("cp.shares.smbNow")} hint={t("cp.shares.smbNowHint")} checked={smbEnabled} onChange={setSmb} />
       {error && <p className="text-sm text-rose-600">{error}</p>}
       <div className="flex gap-2">
-        <Button type="submit" loading={busy}><FolderPlus size={16} /> Create share</Button>
-        <Button type="button" variant="ghost" onClick={onDone}>Cancel</Button>
+        <Button type="submit" loading={busy}><FolderPlus size={16} /> {t("cp.shares.createShare")}</Button>
+        <Button type="button" variant="ghost" onClick={onDone}>{t("common.cancel")}</Button>
       </div>
     </form>
   );

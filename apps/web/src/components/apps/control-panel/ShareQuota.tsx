@@ -6,6 +6,8 @@ import { useNotifications } from "../../../store/notifications.ts";
 import { confirmDialog } from "../../../store/dialogs.ts";
 import { formatBytes } from "../../../lib/format.ts";
 import { Button, Input, Select } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
+import { fillElements } from "./fillElements.tsx";
 
 /**
  * A size cap for one shared folder.
@@ -31,6 +33,7 @@ export function ShareQuota({
   perUserNote: string;
   onChanged: () => Promise<void>;
 }) {
+  const t = useT();
   const push = useNotifications((s) => s.push);
   const [amount, setAmount] = useState(() => (share.quotaBytes > 0 ? String(share.quotaBytes / 1024 ** 3) : ""));
   const [unit, setUnit] = useState("GiB");
@@ -48,11 +51,11 @@ export function ShareQuota({
       if (res.quotaWarning) {
         setError(res.quotaWarning);
       } else {
-        push({ level: "success", title: bytes > 0 ? "Quota set" : "Quota removed", body: share.name });
+        push({ level: "success", title: bytes > 0 ? t("cp.quota.set") : t("cp.quota.removed"), body: share.name });
       }
       await onChanged();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't set that quota.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.quota.setFailed"));
     } finally {
       setBusy(null);
     }
@@ -61,21 +64,19 @@ export function ShareQuota({
   async function enable() {
     if (!share.volume) return;
     const ok = await confirmDialog({
-      title: `Turn on quotas for "${share.volume}"?`,
-      message:
-        "The volume is unmounted and remounted to switch this on, so anything reading from it - a copy in progress, " +
-        "a running container - will be interrupted for a moment. Nothing is erased.",
-      confirmLabel: "Enable quotas",
+      title: t("cp.quota.enableTitle", { volume: share.volume }),
+      message: t("cp.quota.enableMessage"),
+      confirmLabel: t("cp.quota.enable"),
     });
     if (!ok) return;
     setBusy("enable");
     setError(null);
     try {
       await api.post(`/admin/quotas/${share.volume}/enable`, {});
-      push({ level: "success", title: "Quotas enabled", body: share.volume });
+      push({ level: "success", title: t("cp.quota.enabled"), body: share.volume });
       await onChanged();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't enable quotas on that volume.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.quota.enableFailed"));
     } finally {
       setBusy(null);
     }
@@ -87,27 +88,25 @@ export function ShareQuota({
   return (
     <div>
       <h4 className="mb-2 flex items-center gap-2 text-sm font-semibold text-ink-soft">
-        <Gauge size={15} /> Size limit
+        <Gauge size={15} /> {t("cp.quota.title")}
       </h4>
 
       {onDefaultRoot ? (
         <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-ink-faint ring-1 ring-slate-200/70">
-          This folder lives in the default share root rather than on a data volume, and a quota needs a volume of its
-          own to account against. Create the share on a data volume to cap it.
+          {t("cp.quota.defaultRoot")}
         </p>
       ) : !status?.supported ? (
         <p className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 ring-1 ring-amber-200">
           <Info size={13} className="mt-0.5 shrink-0" />
-          <span>{status?.reason || "Quotas aren't available on this volume."}</span>
+          <span>{status?.reason || t("cp.quota.unavailable")}</span>
         </p>
       ) : !status.active ? (
         <div className="rounded-lg bg-slate-50 p-3 ring-1 ring-slate-200/70">
           <p className="mb-2 text-xs text-ink-faint">
-            Quotas aren't switched on for <strong className="text-ink-soft">{share.volume}</strong> yet. Turning them on
-            remounts the volume once; after that, every share on it can have its own limit.
+            {fillElements(t("cp.quota.notActive"), { volume: <strong className="text-ink-soft">{share.volume}</strong> })}
           </p>
           <Button variant="secondary" className="h-8 px-3 text-xs" loading={busy === "enable"} onClick={enable}>
-            Enable quotas on {share.volume}
+            {t("cp.quota.enableOn", { volume: share.volume ?? "" })}
           </Button>
         </div>
       ) : (
@@ -116,7 +115,7 @@ export function ShareQuota({
             <div className="mb-2.5">
               <div className="mb-1 flex items-center justify-between text-xs">
                 <span className="text-ink-soft">
-                  {used != null ? formatBytes(used) : "-"} of {formatBytes(share.quotaBytes)}
+                  {t("storage.used", { used: used != null ? formatBytes(used) : "-", total: formatBytes(share.quotaBytes) })}
                 </span>
                 {pct != null && (
                   <span className={pct >= 90 ? "font-medium text-rose-600" : "text-ink-faint"}>{pct.toFixed(0)}%</span>
@@ -141,7 +140,7 @@ export function ShareQuota({
               step="any"
               value={amount}
               onChange={(e) => setAmount(e.target.value)}
-              placeholder="No limit"
+              placeholder={t("cp.quota.noLimit")}
               className="h-8 w-28 text-xs"
             />
             <Select value={unit} onChange={(e) => setUnit(e.target.value)} className="h-8 w-20 py-0 text-xs">
@@ -153,17 +152,17 @@ export function ShareQuota({
               onClick={() => save(Math.round(Number(amount) * unitBytes))}
               disabled={!amount || Number(amount) <= 0}
             >
-              Set limit
+              {t("cp.quota.setLimit")}
             </Button>
             {share.quotaBytes > 0 && (
               <Button variant="ghost" className="h-8 px-3 text-xs" loading={busy === "save"} onClick={() => save(0)}>
-                Remove
+                {t("common.remove")}
               </Button>
             )}
           </div>
 
           <p className="mt-2 text-[11px] text-ink-faint">
-            Enforced by the filesystem, so it applies to SMB and NFS writes as well as the web interface.
+            {t("cp.quota.enforced")}
           </p>
         </div>
       )}

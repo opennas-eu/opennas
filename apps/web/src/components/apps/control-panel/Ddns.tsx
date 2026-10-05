@@ -4,6 +4,8 @@ import type { DdnsProviderId, DdnsResponse, DdnsStatus } from "@opennas/shared";
 import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { Button, Field, Input, Select, Toggle } from "../../ui/controls.tsx";
+import { useT, type MessageKey } from "../../../i18n/index.ts";
+import { fillElements } from "./fillElements.tsx";
 
 /**
  * Dynamic DNS.
@@ -13,28 +15,30 @@ import { Button, Field, Input, Select, Toggle } from "../../ui/controls.tsx";
  * stored. Same shape as the SMTP password, and for the same reason.
  */
 
-const PROVIDERS: { id: DdnsProviderId; label: string; blurb: string; needs: ("username" | "server" | "zone")[] }[] = [
+const PROVIDERS: { id: DdnsProviderId; label: string; labelKey?: MessageKey; blurbKey: MessageKey; needs: ("username" | "server" | "zone")[] }[] = [
   {
     id: "duckdns",
     label: "DuckDNS",
-    blurb: "Free, and only needs your subdomain and token.",
+    blurbKey: "cp.ddns.blurbDuck",
     needs: [],
   },
   {
     id: "dyndns2",
     label: "No-IP, Dynu, Namecheap and others (dyndns2)",
-    blurb: "The old DynDNS protocol, which most providers still speak. You'll need their update host and your account details.",
+    labelKey: "cp.ddns.labelDyndns2",
+    blurbKey: "cp.ddns.blurbDyndns2",
     needs: ["username", "server"],
   },
   {
     id: "cloudflare",
     label: "Cloudflare",
-    blurb: "For a domain you own. Create the A record once; OpenNAS keeps it pointed here. Use a scoped API token, not your account key.",
+    blurbKey: "cp.ddns.blurbCloudflare",
     needs: ["zone"],
   },
 ];
 
 export function Ddns() {
+  const t = useT();
   const [data, setData] = useState<DdnsStatus | null>(null);
   const [secret, setSecret] = useState("");
   const [busy, setBusy] = useState<"save" | "update" | null>(null);
@@ -71,9 +75,9 @@ export function Ddns() {
       });
       setSecret("");
       setData(res.ddns);
-      push({ level: "success", title: "Dynamic DNS saved" });
+      push({ level: "success", title: t("cp.ddns.saved") });
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't save that.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.ddns.saveFailed"));
     } finally {
       setBusy(null);
     }
@@ -87,7 +91,7 @@ export function Ddns() {
       setData(res.ddns);
       if (res.ddns.lastStatus === "error") setError(res.ddns.lastMessage);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't run the update.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.ddns.updateFailed"));
     } finally {
       setBusy(null);
     }
@@ -96,56 +100,55 @@ export function Ddns() {
   return (
     <section className="mb-6">
       <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-ink-soft">
-        <Globe2 size={15} /> Dynamic DNS
+        <Globe2 size={15} /> {t("cp.ddns.title")}
       </h3>
       <p className="mb-3 text-xs text-ink-faint">
-        Keeps a hostname pointed at this connection as your address changes, so the NAS stays reachable from outside by
-        name. It's also what automatic HTTPS needs - a certificate can only be issued for a name that resolves here.
+        {t("cp.ddns.intro")}
       </p>
 
       <div className="max-w-lg space-y-3">
         <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2">
           <div>
-            <div className="text-sm font-medium text-ink-soft">Keep my hostname up to date</div>
-            <div className="text-xs text-ink-faint">Checked every five minutes; only sent when the address changes.</div>
+            <div className="text-sm font-medium text-ink-soft">{t("cp.ddns.keepUpToDate")}</div>
+            <div className="text-xs text-ink-faint">{t("cp.ddns.keepHint")}</div>
           </div>
-          <Toggle checked={cfg.enabled} onChange={(v) => patch({ enabled: v })} label="Enable dynamic DNS" />
+          <Toggle checked={cfg.enabled} onChange={(v) => patch({ enabled: v })} label={t("cp.ddns.enable")} />
         </div>
 
-        <Field label="Provider">
+        <Field label={t("cp.ddns.provider")}>
           <Select
             value={cfg.provider}
             onChange={(e) => patch({ provider: e.target.value as DdnsProviderId })}
             className="w-full"
           >
-            {PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
+            {PROVIDERS.map((p) => <option key={p.id} value={p.id}>{p.labelKey ? t(p.labelKey) : p.label}</option>)}
           </Select>
         </Field>
-        <p className="-mt-1 text-[11px] text-ink-faint">{meta.blurb}</p>
+        <p className="-mt-1 text-[11px] text-ink-faint">{t(meta.blurbKey)}</p>
 
-        <Field label="Hostname" hint={cfg.provider === "duckdns" ? "your-name.duckdns.org" : "home.example.com"}>
+        <Field label={t("cp.network.hostname")} hint={cfg.provider === "duckdns" ? "your-name.duckdns.org" : "home.example.com"}>
           <Input value={cfg.hostname} onChange={(e) => patch({ hostname: e.target.value })} />
         </Field>
 
         {meta.needs.includes("server") && (
-          <Field label="Update host" hint="e.g. dynupdate.no-ip.com">
+          <Field label={t("cp.ddns.updateHost")} hint={t("cp.ddns.example", { example: "dynupdate.no-ip.com" })}>
             <Input value={cfg.server} onChange={(e) => patch({ server: e.target.value })} placeholder="dynupdate.no-ip.com" />
           </Field>
         )}
         {meta.needs.includes("username") && (
-          <Field label="Username">
+          <Field label={t("auth.username")}>
             <Input value={cfg.username} onChange={(e) => patch({ username: e.target.value })} autoComplete="off" />
           </Field>
         )}
         {meta.needs.includes("zone") && (
-          <Field label="Zone ID" hint="On the domain's overview page in Cloudflare">
+          <Field label={t("cp.ddns.zone")} hint={t("cp.ddns.zoneHint")}>
             <Input value={cfg.zone} onChange={(e) => patch({ zone: e.target.value })} autoComplete="off" />
           </Field>
         )}
 
         <Field
-          label={cfg.provider === "cloudflare" ? "API token" : cfg.provider === "duckdns" ? "Token" : "Password"}
-          hint={cfg.hasSecret ? "Stored. Leave blank to keep it." : undefined}
+          label={cfg.provider === "cloudflare" ? t("cp.ddns.apiToken") : cfg.provider === "duckdns" ? t("cp.ddns.token") : t("auth.password")}
+          hint={cfg.hasSecret ? t("cp.ddns.stored") : undefined}
         >
           <Input
             type="password"
@@ -157,14 +160,14 @@ export function Ddns() {
         </Field>
 
         <div className="flex flex-wrap items-center gap-2">
-          <Button loading={busy === "save"} onClick={() => void save()}>Save</Button>
+          <Button loading={busy === "save"} onClick={() => void save()}>{t("common.save")}</Button>
           <Button
             variant="secondary"
             loading={busy === "update"}
             disabled={!cfg.enabled || !cfg.hostname || (!cfg.hasSecret && !secret)}
             onClick={() => void updateNow()}
           >
-            <RefreshCw size={15} /> Update now
+            <RefreshCw size={15} /> {t("cp.ddns.updateNow")}
           </Button>
         </div>
 
@@ -186,11 +189,11 @@ export function Ddns() {
               {data.lastMessage}
               {data.lastIp && (
                 <>
-                  {" "}Currently <strong className="font-mono">{data.lastIp}</strong>.
+                  {" "}{fillElements(t("cp.ddns.currently"), { ip: <strong className="font-mono">{data.lastIp}</strong> })}
                 </>
               )}
               {data.lastCheckedAt && (
-                <span className="block opacity-70">Last checked {new Date(data.lastCheckedAt).toLocaleString()}</span>
+                <span className="block opacity-70">{t("cp.ddns.lastChecked", { time: new Date(data.lastCheckedAt).toLocaleString() })}</span>
               )}
             </span>
           </div>

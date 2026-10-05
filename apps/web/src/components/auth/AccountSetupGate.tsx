@@ -3,6 +3,7 @@ import { Fingerprint, KeyRound, ShieldAlert } from "lucide-react";
 import type { MeResponse } from "@opennas/shared";
 import { api, ApiRequestError } from "../../lib/api.ts";
 import { useAuth } from "../../store/auth.ts";
+import { useT } from "../../i18n/index.ts";
 import { registerPasskey, passkeysSupported } from "../../lib/webauthn.ts";
 import { Logo } from "../Logo.tsx";
 import { Button, Field, Input } from "../ui/controls.tsx";
@@ -20,6 +21,7 @@ export function AccountSetupGate() {
   const session = useAuth((s) => s.session);
   const refresh = useAuth((s) => s.refresh);
   const logout = useAuth((s) => s.logout);
+  const t = useT();
   const pending = session?.pendingActions ?? [];
   // Password first: it's the one that came with a deadline attached.
   const step = pending.includes("password") ? "password" : "passkey";
@@ -36,16 +38,17 @@ export function AccountSetupGate() {
             onClick={() => void logout()}
             className="mt-5 w-full text-center text-xs text-ink-faint transition hover:text-ink-soft"
           >
-            Sign out instead
+            {t("ui.gate.signOutInstead")}
           </button>
         </div>
-        <p className="mt-5 text-center text-xs text-white/45">Powered by OpenNAS</p>
+        <p className="mt-5 text-center text-xs text-white/45">{t("auth.poweredBy")}</p>
       </div>
     </div>
   );
 }
 
 function ChangePasswordStep({ onDone }: { onDone: () => Promise<void> }) {
+  const t = useT();
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -54,14 +57,14 @@ function ChangePasswordStep({ onDone }: { onDone: () => Promise<void> }) {
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (next !== confirm) { setError("The two new passwords don't match."); return; }
+    if (next !== confirm) { setError(t("ui.gate.passwordMismatch")); return; }
     setBusy(true);
     setError(null);
     try {
       await api.post<MeResponse>("/auth/me/password", { currentPassword: current, newPassword: next });
       await onDone();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't change your password.");
+      setError(err instanceof ApiRequestError ? err.message : t("ui.gate.passwordFailed"));
     } finally {
       setBusy(false);
     }
@@ -73,24 +76,24 @@ function ChangePasswordStep({ onDone }: { onDone: () => Promise<void> }) {
         <span className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-amber-100 text-amber-600">
           <ShieldAlert size={24} />
         </span>
-        <h1 className="text-lg font-semibold text-ink">Choose a new password</h1>
+        <h1 className="text-lg font-semibold text-ink">{t("ui.gate.passwordTitle")}</h1>
         <p className="text-sm text-ink-faint">
-          The password you signed in with was set for you and is only temporary.
+          {t("ui.gate.passwordBody")}
         </p>
       </div>
       <div className="space-y-4">
-        <Field label="Current password">
+        <Field label={t("ui.gate.currentPassword")}>
           <Input type="password" value={current} onChange={(e) => setCurrent(e.target.value)} autoComplete="current-password" autoFocus />
         </Field>
-        <Field label="New password">
+        <Field label={t("ui.gate.newPassword")}>
           <Input type="password" value={next} onChange={(e) => setNext(e.target.value)} autoComplete="new-password" />
         </Field>
-        <Field label="Confirm new password">
+        <Field label={t("ui.gate.confirmNewPassword")}>
           <Input type="password" value={confirm} onChange={(e) => setConfirm(e.target.value)} autoComplete="new-password" />
         </Field>
         {error && <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700 ring-1 ring-rose-200">{error}</p>}
         <Button type="submit" loading={busy} className="w-full">
-          <KeyRound size={16} /> Set password
+          <KeyRound size={16} /> {t("ui.gate.setPassword")}
         </Button>
       </div>
     </form>
@@ -98,6 +101,7 @@ function ChangePasswordStep({ onDone }: { onDone: () => Promise<void> }) {
 }
 
 function PasskeyStep({ onDone }: { onDone: () => Promise<void> }) {
+  const t = useT();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -109,8 +113,8 @@ function PasskeyStep({ onDone }: { onDone: () => Promise<void> }) {
       await onDone();
     } catch (err) {
       if (err instanceof ApiRequestError) setError(err.message);
-      else if (err instanceof DOMException && err.name === "NotAllowedError") setError("Registration was cancelled.");
-      else setError("Could not register a passkey.");
+      else if (err instanceof DOMException && err.name === "NotAllowedError") setError(t("ui.gate.passkeyCancelled"));
+      else setError(t("ui.gate.passkeyFailed"));
     } finally {
       setBusy(false);
     }
@@ -122,21 +126,20 @@ function PasskeyStep({ onDone }: { onDone: () => Promise<void> }) {
         <span className="mx-auto mb-3 grid h-12 w-12 place-items-center rounded-2xl bg-brand-100 text-brand-600">
           <Fingerprint size={24} />
         </span>
-        <h1 className="text-lg font-semibold text-ink">Register a passkey</h1>
+        <h1 className="text-lg font-semibold text-ink">{t("ui.gate.passkeyTitle")}</h1>
         <p className="text-sm text-ink-faint">
-          This server requires every account to have one. Use Touch&nbsp;ID, Windows&nbsp;Hello or a security key.
+          {t("ui.gate.passkeyBody")}
         </p>
       </div>
       {!passkeysSupported ? (
         <p className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-700 ring-1 ring-amber-200">
-          This browser can't create passkeys. Sign in from a browser that supports them, or ask an administrator to lift
-          the requirement.
+          {t("ui.gate.passkeyUnsupported")}
         </p>
       ) : (
         <>
           {error && <p className="mb-3 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700 ring-1 ring-rose-200">{error}</p>}
           <Button loading={busy} onClick={add} className="w-full">
-            <Fingerprint size={16} /> Create a passkey
+            <Fingerprint size={16} /> {t("ui.gate.createPasskey")}
           </Button>
         </>
       )}

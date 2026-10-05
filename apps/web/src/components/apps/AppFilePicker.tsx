@@ -6,6 +6,7 @@ import type { AppManifest, FileEntry, FileListResponse } from "@opennas/shared";
 import { api } from "../../lib/api.ts";
 import { Button } from "../ui/controls.tsx";
 import { formatBytes } from "../../lib/format.ts";
+import { useT } from "../../i18n/index.ts";
 
 /**
  * The file picker OpenNAS draws when an app asks for a folder.
@@ -44,6 +45,7 @@ export function AppFilePicker({
   const [entries, setEntries] = useState<FileEntry[] | null>(null);
   const [selected, setSelected] = useState<FileEntry | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const t = useT();
 
   const load = useCallback(async (target: string) => {
     setEntries(null);
@@ -54,9 +56,10 @@ export function AppFilePicker({
       setEntries(res.entries);
       setPath(res.path);
     } catch {
-      setError("That folder couldn't be opened.");
+      setError(t("app.picker.openFailed"));
       setEntries([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => { void load("/"); }, [load]);
@@ -69,6 +72,9 @@ export function AppFilePicker({
 
   const segments = path.split("/").filter(Boolean);
   const wantsFolder = request.select === "dir";
+  // The app's name is set in bold, so the sentence is split around it.
+  const [grantBefore, grantAfter] = t(request.mode === "readwrite" ? "app.picker.grantReadWrite" : "app.picker.grantRead").split("{app}");
+  const [givingBefore, givingAfter] = t("app.picker.givingAccess").split("{path}");
 
   // Picking a folder means "the one I'm looking at" unless a child is selected,
   // which is what makes choosing a share root possible without a parent listing.
@@ -90,18 +96,16 @@ export function AppFilePicker({
           <FolderOpen size={18} className="mt-0.5 shrink-0 text-brand-500" />
           <div className="min-w-0 flex-1">
             <h2 className="text-sm font-semibold text-ink">
-              {request.title || `Choose a ${wantsFolder ? "folder" : "file"}`}
+              {request.title || (wantsFolder ? t("app.picker.chooseFolder") : t("app.picker.chooseFile"))}
             </h2>
             <p className="text-[11px] text-ink-faint">
-              <strong className="text-ink-soft">{request.app.name}</strong> will be able to{" "}
-              {request.mode === "readwrite" ? "read and change" : "read"} what you pick - and nothing else. You can take
-              this back at any time in Control Panel → Security.
+              {grantBefore}<strong className="text-ink-soft">{request.app.name}</strong>{grantAfter}
             </p>
           </div>
           <button
             onClick={onCancel}
             className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink-faint transition hover:bg-slate-100 dark:hover:bg-slate-700"
-            title="Cancel"
+            title={t("common.cancel")}
           >
             <X size={15} />
           </button>
@@ -112,7 +116,7 @@ export function AppFilePicker({
             onClick={() => void load("/")}
             className="inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-ink-soft transition hover:bg-slate-100 dark:hover:bg-slate-700"
           >
-            <Home size={12} /> Shared folders
+            <Home size={12} /> {t("shares.title")}
           </button>
           {segments.map((seg, i) => (
             <span key={i} className="flex shrink-0 items-center">
@@ -129,11 +133,11 @@ export function AppFilePicker({
 
         <div className="opennas-scroll min-h-[14rem] flex-1 overflow-auto p-1.5">
           {entries === null ? (
-            <p className="p-4 text-center text-xs text-ink-faint">Loading...</p>
+            <p className="p-4 text-center text-xs text-ink-faint">{t("desktop.loading")}</p>
           ) : error ? (
             <p className="p-4 text-center text-xs text-rose-600">{error}</p>
           ) : entries.length === 0 ? (
-            <p className="p-4 text-center text-xs text-ink-faint">This folder is empty.</p>
+            <p className="p-4 text-center text-xs text-ink-faint">{t("app.files.empty")}</p>
           ) : (
             <ul>
               {entries.map((entry) => {
@@ -180,21 +184,21 @@ export function AppFilePicker({
             {choice ? (
               <>
                 <Lock size={10} className="mr-1 inline" />
-                Giving access to <strong className="text-ink-soft">{choice.path}</strong>
+                {givingBefore}<strong className="text-ink-soft">{choice.path}</strong>{givingAfter}
               </>
             ) : wantsFolder ? (
-              "Open a shared folder, then choose it or one of its subfolders."
+              t("app.picker.folderHint")
             ) : (
-              "Select a file."
+              t("app.picker.fileHint")
             )}
           </p>
-          <Button variant="ghost" className="h-8 shrink-0 px-3 text-xs" onClick={onCancel}>Cancel</Button>
+          <Button variant="ghost" className="h-8 shrink-0 px-3 text-xs" onClick={onCancel}>{t("common.cancel")}</Button>
           <Button
             className="h-8 shrink-0 px-3 text-xs"
             disabled={!canConfirm}
             onClick={() => choice && onPick(choice)}
           >
-            {wantsFolder ? "Use this folder" : "Use this file"}
+            {wantsFolder ? t("app.picker.useFolder") : t("app.picker.useFile")}
           </Button>
         </footer>
       </div>

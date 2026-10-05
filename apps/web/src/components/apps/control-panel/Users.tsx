@@ -9,8 +9,10 @@ import { UserApps } from "./UserApps.tsx";
 import { Autologin } from "./Autologin.tsx";
 import { initialsOf } from "../../../lib/format.ts";
 import { Button, Field, Input, Select, Toggle } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
 
 export function Users() {
+  const t = useT();
   const [appsOpen, setAppsOpen] = useState<string | null>(null);
   const [users, setUsers] = useState<AdminUser[] | null>(null);
   const [showCreate, setShowCreate] = useState(false);
@@ -38,7 +40,7 @@ export function Users() {
       await api.put<PasswordPolicyResponse>("/admin/security/password-policy", { blockPwned: v });
     } catch (err) {
       setBlockPwned(!v);
-      push({ level: "warning", title: "Couldn't update policy", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.users.policyFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
@@ -51,24 +53,24 @@ export function Users() {
       setRequirePasskey(!v);
       // The server refuses to switch this on for an admin who has no passkey,
       // because it would strand them at the enrolment screen.
-      push({ level: "warning", title: "Couldn't update policy", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.users.policyFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
   /** Clear a user's 2FA - the lost-phone path, when recovery codes are gone too. */
   async function resetTwoFactor(u: AdminUser) {
     if (!(await confirmDialog({
-      title: `Turn off two-factor for @${u.username}?`,
-      message: "They'll sign in with just a password until they set it up again. Only do this if you're sure who you're talking to.",
-      confirmLabel: "Turn off",
+      title: t("cp.users.twoFactorOffTitle", { username: u.username }),
+      message: t("cp.users.twoFactorOffMessage"),
+      confirmLabel: t("cp.users.turnOff"),
       danger: true,
     }))) return;
     try {
       await api.del(`/admin/users/${u.id}/totp`);
-      push({ level: "success", title: "Two-factor turned off", body: `@${u.username} can sign in with a password.` });
+      push({ level: "success", title: t("cp.users.twoFactorOff"), body: t("cp.users.twoFactorOffBody", { username: u.username }) });
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't turn it off", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.users.turnOffFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
@@ -80,16 +82,16 @@ export function Users() {
       await api.patch(`/admin/users/${id}`, body);
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Update failed", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.users.updateFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
   async function resetPassword(u: AdminUser) {
     const pw = await promptDialog({
-      title: `Reset password for @${u.username}`,
-      message: "Enter a new password (at least 8 characters).",
-      confirmLabel: "Set password",
-      placeholder: "New password",
+      title: t("cp.users.resetTitle", { username: u.username }),
+      message: t("cp.users.resetMessage"),
+      confirmLabel: t("cp.users.setPassword"),
+      placeholder: t("cp.users.newPassword"),
       inputType: "password",
     });
     if (!pw) return;
@@ -100,26 +102,26 @@ export function Users() {
       await load();
       push({
         level: "success",
-        title: "Temporary password set",
-        body: `@${u.username} must choose their own password at their next sign-in.`,
+        title: t("cp.users.tempSet"),
+        body: t("cp.users.tempSetBody", { username: u.username }),
       });
     } catch (err) {
-      push({ level: "warning", title: "Couldn't reset password", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.users.resetFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
   async function remove(u: AdminUser) {
     if (!(await confirmDialog({
-      title: `Delete user "${u.displayName}"?`,
-      message: `@${u.username} will be removed. This can't be undone.`,
-      confirmLabel: "Delete user",
+      title: t("cp.users.deleteTitle", { name: u.displayName }),
+      message: t("cp.users.deleteMessage", { username: u.username }),
+      confirmLabel: t("cp.users.deleteUser"),
       danger: true,
     }))) return;
     try {
       await api.del(`/admin/users/${u.id}`);
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't delete user", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.users.deleteFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
@@ -127,11 +129,11 @@ export function Users() {
     <div>
       <div className="mb-5 flex items-start justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-ink">Users</h2>
-          <p className="text-sm text-ink-faint">Create accounts and manage roles & access.</p>
+          <h2 className="text-lg font-semibold text-ink">{t("cp.users")}</h2>
+          <p className="text-sm text-ink-faint">{t("cp.users.subtitle")}</p>
         </div>
         <Button className="h-9" onClick={() => setShowCreate((s) => !s)}>
-          <UserPlus size={16} /> New user
+          <UserPlus size={16} /> {t("cp.users.newUser")}
         </Button>
       </div>
 
@@ -142,29 +144,28 @@ export function Users() {
         <div className="flex items-center gap-3">
           <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-amber-50 text-amber-600 ring-1 ring-amber-200"><ShieldAlert size={17} /></span>
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-ink-soft">Block breached passwords</div>
-            <div className="text-xs text-ink-faint">Reject passwords found in a known data breach (checked privately via HaveIBeenPwned at set time).</div>
+            <div className="text-sm font-medium text-ink-soft">{t("cp.users.blockBreached")}</div>
+            <div className="text-xs text-ink-faint">{t("cp.users.blockBreachedHint")}</div>
           </div>
-          <Toggle checked={blockPwned} onChange={(v) => void togglePolicy(v)} label="Block breached passwords" />
+          <Toggle checked={blockPwned} onChange={(v) => void togglePolicy(v)} label={t("cp.users.blockBreached")} />
         </div>
         {pwnedCount > 0 && (
-          <p className="mt-2 text-xs text-amber-700">{pwnedCount} user{pwnedCount === 1 ? "'s" : "s'"} password was found in a breach - reset it below.</p>
+          <p className="mt-2 text-xs text-amber-700">{t("cp.users.pwnedCount", { count: pwnedCount })}</p>
         )}
 
         <div className="mt-3 flex items-center gap-3 border-t border-slate-200 pt-3">
           <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand-50 text-brand-600 ring-1 ring-brand-200"><Fingerprint size={17} /></span>
           <div className="min-w-0 flex-1">
-            <div className="text-sm font-medium text-ink-soft">Require a passkey</div>
+            <div className="text-sm font-medium text-ink-soft">{t("cp.users.requirePasskey")}</div>
             <div className="text-xs text-ink-faint">
-              Everyone must enrol one. Accounts without a passkey can do nothing but register one until they have.
+              {t("cp.users.requirePasskeyHint")}
             </div>
           </div>
-          <Toggle checked={requirePasskey} onChange={(v) => void togglePasskeyPolicy(v)} label="Require a passkey" />
+          <Toggle checked={requirePasskey} onChange={(v) => void togglePasskeyPolicy(v)} label={t("cp.users.requirePasskey")} />
         </div>
         {requirePasskey && noPasskeyCount > 0 && (
           <p className="mt-2 text-xs text-amber-700">
-            {noPasskeyCount} account{noPasskeyCount === 1 ? " has" : "s have"} no passkey yet and will be held at the
-            enrolment screen on their next sign-in.
+            {t("cp.users.noPasskeyCount", { count: noPasskeyCount })}
           </p>
         )}
       </div>
@@ -172,7 +173,7 @@ export function Users() {
       <Autologin />
 
       <div className="space-y-2">
-        {users === null && <p className="text-sm text-ink-faint">Loading...</p>}
+        {users === null && <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>}
         {users?.map((u) => (
           <div key={u.id} className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200/70">
           <div className="flex flex-wrap items-center gap-3">
@@ -182,23 +183,23 @@ export function Users() {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
                 <span className="truncate font-medium text-ink-soft">{u.displayName}</span>
-                {u.activeSessions > 0 && !u.disabled && <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />online</span>}
-                {u.disabled && <span className="rounded-full bg-slate-200 px-1.5 text-[11px] text-ink-faint">disabled</span>}
-                {u.passwordPwned && <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-1.5 text-[11px] text-amber-700 ring-1 ring-amber-200" title="This password was found in a known data breach"><ShieldAlert size={11} /> breached</span>}
-                {u.twoFactorEnabled && <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-1.5 text-[11px] text-emerald-700 ring-1 ring-emerald-200" title="Two-factor authentication is on"><ShieldCheck size={11} /> 2FA</span>}
-                {u.mustChangePassword && <span className="rounded-full bg-amber-100 px-1.5 text-[11px] text-amber-800" title="Holds a temporary password and must change it at next sign-in">temporary password</span>}
-                {u.appsRestricted && <span className="inline-flex items-center gap-1 rounded-full bg-slate-200 px-1.5 text-[11px] text-ink-faint" title="This account can only use some apps"><LayoutGrid size={11} /> limited apps</span>}
-                {u.id === me && <span className="rounded-full bg-brand-100 px-1.5 text-[11px] text-brand-700">you</span>}
+                {u.activeSessions > 0 && !u.disabled && <span className="inline-flex items-center gap-1 text-[11px] text-emerald-600"><span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />{t("cp.users.online")}</span>}
+                {u.disabled && <span className="rounded-full bg-slate-200 px-1.5 text-[11px] text-ink-faint">{t("cp.users.disabledBadge")}</span>}
+                {u.passwordPwned && <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-1.5 text-[11px] text-amber-700 ring-1 ring-amber-200" title={t("cp.users.breachedTitle")}><ShieldAlert size={11} /> {t("cp.users.breached")}</span>}
+                {u.twoFactorEnabled && <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-1.5 text-[11px] text-emerald-700 ring-1 ring-emerald-200" title={t("cp.users.twoFactorOnTitle")}><ShieldCheck size={11} /> 2FA</span>}
+                {u.mustChangePassword && <span className="rounded-full bg-amber-100 px-1.5 text-[11px] text-amber-800" title={t("cp.users.tempTitle")}>{t("cp.users.tempBadge")}</span>}
+                {u.appsRestricted && <span className="inline-flex items-center gap-1 rounded-full bg-slate-200 px-1.5 text-[11px] text-ink-faint" title={t("cp.users.limitedTitle")}><LayoutGrid size={11} /> {t("cp.users.limitedApps")}</span>}
+                {u.id === me && <span className="rounded-full bg-brand-100 px-1.5 text-[11px] text-brand-700">{t("cp.users.you")}</span>}
               </div>
-              <div className="text-xs text-ink-faint">@{u.username} - {u.passkeyCount} passkey{u.passkeyCount === 1 ? "" : "s"} - {u.source === "local" ? "local" : "SSO"}</div>
+              <div className="text-xs text-ink-faint">@{u.username} - {t("cp.users.passkeyCount", { count: u.passkeyCount })} - {u.source === "local" ? t("cp.users.local") : "SSO"}</div>
             </div>
 
             <Select value={u.role} onChange={(e) => void patch(u.id, { role: e.target.value as UserRole })} className="h-9 py-0">
-              <option value="admin">Admin</option>
-              <option value="user">User</option>
+              <option value="admin">{t("cp.users.roleAdmin")}</option>
+              <option value="user">{t("cp.users.roleUser")}</option>
             </Select>
 
-            <Button variant="ghost" className="h-9 px-2" title="Set a temporary password" onClick={() => void resetPassword(u)}>
+            <Button variant="ghost" className="h-9 px-2" title={t("cp.users.setTempTitle")} onClick={() => void resetPassword(u)}>
               <KeyRound size={16} />
             </Button>
 
@@ -206,7 +207,7 @@ export function Users() {
               <Button
                 variant="ghost"
                 className={`h-9 px-2 ${appsOpen === u.id ? "bg-slate-200" : ""}`}
-                title="Choose which apps this account can use"
+                title={t("cp.users.chooseAppsTitle")}
                 onClick={() => setAppsOpen((cur) => (cur === u.id ? null : u.id))}
               >
                 <LayoutGrid size={16} />
@@ -214,7 +215,7 @@ export function Users() {
             )}
 
             {u.twoFactorEnabled && (
-              <Button variant="ghost" className="h-9 px-2" title="Turn off two-factor (lost device)" onClick={() => void resetTwoFactor(u)}>
+              <Button variant="ghost" className="h-9 px-2" title={t("cp.users.twoFactorOffButton")} onClick={() => void resetTwoFactor(u)}>
                 <ShieldCheck size={16} />
               </Button>
             )}
@@ -225,10 +226,10 @@ export function Users() {
               disabled={u.id === me}
               onClick={() => void patch(u.id, { disabled: !u.disabled })}
             >
-              {u.disabled ? "Enable" : "Disable"}
+              {u.disabled ? t("common.enable") : t("common.disable")}
             </Button>
 
-            <Button variant="ghost" className="h-9 px-2 text-rose-600 hover:bg-rose-50" title="Delete" disabled={u.id === me} onClick={() => void remove(u)}>
+            <Button variant="ghost" className="h-9 px-2 text-rose-600 hover:bg-rose-50" title={t("common.delete")} disabled={u.id === me} onClick={() => void remove(u)}>
               <Trash2 size={16} />
             </Button>
           </div>
@@ -253,6 +254,7 @@ function CreateUserForm({ onDone }: { onDone: () => void }) {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const push = useNotifications((s) => s.push);
+  const t = useT();
 
   function up<K extends keyof CreateUserRequest>(k: K, v: CreateUserRequest[K]) {
     setForm((f) => ({ ...f, [k]: v }));
@@ -264,11 +266,11 @@ function CreateUserForm({ onDone }: { onDone: () => void }) {
     setErrors({});
     try {
       await api.post("/admin/users", form);
-      push({ level: "success", title: "User created", body: `@${form.username} can now sign in.` });
+      push({ level: "success", title: t("cp.users.created"), body: t("cp.users.createdBody", { username: form.username }) });
       onDone();
     } catch (err) {
       if (err instanceof ApiRequestError) setErrors(err.fields ?? { _: err.message });
-      else setErrors({ _: "Failed to create user." });
+      else setErrors({ _: t("cp.users.createFailed") });
     } finally {
       setBusy(false);
     }
@@ -277,24 +279,24 @@ function CreateUserForm({ onDone }: { onDone: () => void }) {
   return (
     <form onSubmit={submit} className="mb-4 space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Display name" error={errors.displayName}>
-          <Input value={form.displayName} onChange={(e) => up("displayName", e.target.value)} placeholder="Family" />
+        <Field label={t("cp.users.displayName")} error={errors.displayName}>
+          <Input value={form.displayName} onChange={(e) => up("displayName", e.target.value)} placeholder={t("cp.users.displayNameExample")} />
         </Field>
-        <Field label="Username" error={errors.username}>
-          <Input value={form.username} onChange={(e) => up("username", e.target.value.replace(/\s/g, ""))} placeholder="family" />
+        <Field label={t("auth.username")} error={errors.username}>
+          <Input value={form.username} onChange={(e) => up("username", e.target.value.replace(/\s/g, ""))} placeholder={t("cp.users.usernameExample")} />
         </Field>
-        <Field label="Email (optional)" error={errors.email}>
+        <Field label={t("cp.users.emailOptional")} error={errors.email}>
           <Input type="email" value={form.email ?? ""} onChange={(e) => up("email", e.target.value)} placeholder="family@example.com" />
         </Field>
-        <Field label="Role">
+        <Field label={t("cp.users.role")}>
           <Select value={form.role} onChange={(e) => up("role", e.target.value as UserRole)} className="w-full">
-            <option value="user">User</option>
-            <option value="admin">Admin</option>
+            <option value="user">{t("cp.users.roleUser")}</option>
+            <option value="admin">{t("cp.users.roleAdmin")}</option>
           </Select>
         </Field>
       </div>
-      <Field label="Password" error={errors.password}>
-        <Input type="password" value={form.password} onChange={(e) => up("password", e.target.value)} placeholder="At least 8 characters" autoComplete="new-password" />
+      <Field label={t("auth.password")} error={errors.password}>
+        <Input type="password" value={form.password} onChange={(e) => up("password", e.target.value)} placeholder={t("cp.users.passwordPlaceholder")} autoComplete="new-password" />
       </Field>
       <label className="flex items-start gap-2.5 text-sm text-ink-soft">
         <input
@@ -304,16 +306,16 @@ function CreateUserForm({ onDone }: { onDone: () => void }) {
           className="mt-0.5 h-4 w-4 rounded border-slate-300 text-brand-600"
         />
         <span>
-          Temporary password
+          {t("cp.users.tempPassword")}
           <span className="block text-xs text-ink-faint">
-            They'll have to choose their own before they can use anything.
+            {t("cp.users.tempPasswordHint")}
           </span>
         </span>
       </label>
       {errors._ && <p className="text-sm text-rose-600">{errors._}</p>}
       <div className="flex gap-2">
-        <Button type="submit" loading={busy}><Plus size={16} /> Create user</Button>
-        <Button type="button" variant="ghost" onClick={onDone}>Cancel</Button>
+        <Button type="submit" loading={busy}><Plus size={16} /> {t("cp.users.createUser")}</Button>
+        <Button type="button" variant="ghost" onClick={onDone}>{t("common.cancel")}</Button>
       </div>
     </form>
   );

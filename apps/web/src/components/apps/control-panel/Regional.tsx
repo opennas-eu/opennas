@@ -54,7 +54,7 @@ function LanguagePicker() {
       )}
       {current && current.id !== "en" && (
         <p className="mt-2 text-[11px] text-ink-faint">
-          {t("regional.partial", { name: current.nativeName })} ({total} phrases in total.)
+          {t("regional.partial", { name: current.nativeName })} {t("cp.regional.phrases", { count: total })}
         </p>
       )}
     </section>
@@ -62,6 +62,7 @@ function LanguagePicker() {
 }
 
 export function Regional() {
+  const t = useT();
   const [info, setInfo] = useState<TimeInfo | null>(null);
   const [tz, setTz] = useState("");
   const [ntp, setNtp] = useState("");
@@ -81,9 +82,9 @@ export function Regional() {
     try {
       const res = await api.post<TimeResponse>("/admin/time", { timezone: tz, ntpServer: ntp });
       setInfo(res.time);
-      push({ level: "success", title: "Time settings saved" });
+      push({ level: "success", title: t("cp.regional.saved") });
     } catch (err) {
-      push({ level: "warning", title: "Couldn't save", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.couldntSave"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     } finally {
       setBusy(false);
     }
@@ -92,8 +93,8 @@ export function Regional() {
   return (
     <div>
       <div className="mb-5">
-        <h2 className="text-lg font-semibold text-ink">Time &amp; Region</h2>
-        <p className="text-sm text-ink-faint">Language, timezone and time synchronization.</p>
+        <h2 className="text-lg font-semibold text-ink">{t("cp.regional")}</h2>
+        <p className="text-sm text-ink-faint">{t("cp.regional.subtitle")}</p>
       </div>
 
       <LanguagePicker />
@@ -107,14 +108,14 @@ export function Regional() {
       </div>
 
       <div className="max-w-md space-y-4">
-        <Field label="Timezone" hint="e.g. Europe/Berlin">
+        <Field label={t("cp.regional.timezone")} hint={t("cp.regional.timezoneHint")}>
           <Input list="tzlist" value={tz} onChange={(e) => setTz(e.target.value)} />
           <datalist id="tzlist">{COMMON_ZONES.map((z) => <option key={z} value={z} />)}</datalist>
         </Field>
-        <Field label="NTP server">
+        <Field label={t("cp.regional.ntp")}>
           <Input value={ntp} onChange={(e) => setNtp(e.target.value)} placeholder="pool.ntp.org" />
         </Field>
-        <Button loading={busy} onClick={save}><Save size={15} /> Save</Button>
+        <Button loading={busy} onClick={save}><Save size={15} /> {t("common.save")}</Button>
       </div>
     </div>
   );

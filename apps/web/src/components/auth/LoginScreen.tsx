@@ -26,9 +26,12 @@ export function LoginScreen() {
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     const sso = params.get("sso_error");
-    if (sso === "not_provisioned") setError("Your SSO account isn't permitted on this server.");
-    else if (sso) setError("SSO sign-in failed. Please try again.");
+    if (sso === "not_provisioned") setError(t("ui.auth.ssoNotProvisioned"));
+    else if (sso === "not_setup") setError(t("ui.auth.ssoNotSetup"));
+    else if (sso === "state_mismatch") setError(t("ui.auth.ssoStateMismatch"));
+    else if (sso) setError(t("ui.auth.ssoFailed"));
     if (sso) window.history.replaceState({}, "", location.pathname);
+    // Runs once on arrival; the message is read in the locale at that moment.
   }, []);
 
   async function passwordLogin(e: React.FormEvent) {
@@ -44,7 +47,7 @@ export function LoginScreen() {
         setSession(res.session);
       }
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Sign-in failed.");
+      setError(err instanceof ApiRequestError ? err.message : t("ui.auth.signInFailed"));
     } finally {
       setBusy(null);
     }
@@ -59,7 +62,7 @@ export function LoginScreen() {
     } catch (err) {
       if (err instanceof ApiRequestError) setError(err.message);
       else if (err instanceof DOMException && err.name === "NotAllowedError") setError(null);
-      else setError("Passkey sign-in failed.");
+      else setError(t("ui.auth.passkeyFailed"));
     } finally {
       setBusy(null);
     }
@@ -74,7 +77,7 @@ export function LoginScreen() {
       const res = await api.post<LoginResponse>("/auth/login/totp", { ticket: mfa.ticket, code: code.trim() });
       if (res.session) setSession(res.session);
     } catch (err) {
-      const message = err instanceof ApiRequestError ? err.message : "Sign-in failed.";
+      const message = err instanceof ApiRequestError ? err.message : t("ui.auth.signInFailed");
       // An expired or spent ticket means starting over, not retrying the code.
       if (err instanceof ApiRequestError && err.code === "ticket") setMfa(null);
       setCode("");
@@ -107,7 +110,7 @@ export function LoginScreen() {
             </div>
             <h1 className="text-xl font-semibold text-ink">{bootstrap?.instanceName ?? "OpenNAS"}</h1>
             <p className="text-sm text-ink-faint">
-              {mfa ? "Two-factor authentication" : t("auth.subtitle")}
+              {mfa ? t("ui.auth.twoFactor") : t("auth.subtitle")}
             </p>
           </div>
 
@@ -117,10 +120,9 @@ export function LoginScreen() {
                 <ShieldCheck size={24} />
               </span>
               <p className="text-center text-sm text-ink-faint">
-                Enter the six-digit code from your authenticator app
-                {mfa.recoveryCodesAvailable ? ", or one of your recovery codes." : "."}
+                {mfa.recoveryCodesAvailable ? t("ui.auth.codePromptRecovery") : t("ui.auth.codePrompt")}
               </p>
-              <Field label="Code">
+              <Field label={t("ui.auth.code")}>
                 <Input
                   value={code}
                   onChange={(e) => setCode(e.target.value)}
@@ -139,14 +141,14 @@ export function LoginScreen() {
               )}
 
               <Button type="submit" loading={busy === "code"} className="w-full" disabled={code.trim().length === 0}>
-                <LogIn size={16} /> Verify
+                <LogIn size={16} /> {t("ui.auth.verify")}
               </Button>
               <button
                 type="button"
                 onClick={backToPassword}
                 className="flex w-full items-center justify-center gap-1 text-xs text-ink-faint transition hover:text-ink-soft"
               >
-                <ArrowLeft size={12} /> Use a different account
+                <ArrowLeft size={12} /> {t("ui.auth.differentAccount")}
               </button>
             </form>
           ) : (

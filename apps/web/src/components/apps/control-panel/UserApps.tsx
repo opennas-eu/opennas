@@ -4,6 +4,8 @@ import type { UserAppAccessResponse } from "@opennas/shared";
 import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { Button, Toggle } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
+import { fillElements } from "./fillElements.tsx";
 
 /**
  * Which apps one person may use.
@@ -17,6 +19,7 @@ import { Button, Toggle } from "../../ui/controls.tsx";
  * they had taken it away, and then wonder why the user still had it.
  */
 export function UserApps({ userId, onChanged }: { userId: string; onChanged: () => void }) {
+  const t = useT();
   const [data, setData] = useState<UserAppAccessResponse | null>(null);
   const [restricted, setRestricted] = useState(false);
   const [chosen, setChosen] = useState<Set<string>>(new Set());
@@ -53,15 +56,15 @@ export function UserApps({ userId, onChanged }: { userId: string; onChanged: () 
       setChosen(new Set(res.appIds));
       push({
         level: "success",
-        title: "Saved",
-        body: res.restricted ? "This account can now use only the apps you picked." : "This account can use every app.",
+        title: t("cp.saved"),
+        body: res.restricted ? t("cp.userApps.savedRestricted") : t("cp.userApps.savedAll"),
       });
       onChanged();
     } catch (err) {
       push({
         level: "warning",
-        title: "Couldn't save that",
-        body: err instanceof ApiRequestError ? err.message : "Failed.",
+        title: t("cp.userApps.saveFailed"),
+        body: err instanceof ApiRequestError ? err.message : t("cp.failed"),
       });
     } finally {
       setSaving(false);
@@ -71,7 +74,7 @@ export function UserApps({ userId, onChanged }: { userId: string; onChanged: () 
   if (data === null) {
     return (
       <div className="flex items-center gap-2 px-3 py-2 text-xs text-ink-faint">
-        <Loader2 size={13} className="animate-spin" /> Loading apps...
+        <Loader2 size={13} className="animate-spin" /> {t("cp.userApps.loading")}
       </div>
     );
   }
@@ -85,12 +88,11 @@ export function UserApps({ userId, onChanged }: { userId: string; onChanged: () 
         <span className="mt-0.5 shrink-0 text-ink-faint"><Lock size={15} /></span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center justify-between gap-3">
-            <span className="text-sm font-medium text-ink-soft">Limit which apps this account can use</span>
-            <Toggle checked={restricted} onChange={setRestricted} label="Limit apps" />
+            <span className="text-sm font-medium text-ink-soft">{t("cp.userApps.limitTitle")}</span>
+            <Toggle checked={restricted} onChange={setRestricted} label={t("cp.userApps.limitLabel")} />
           </div>
           <p className="mt-1 text-xs text-ink-faint">
-            Off means every app their role allows, which is how every account starts. Turning it on hides the rest from
-            their desktop <em>and</em> refuses them if they go looking - it isn't only the launcher.
+            {fillElements(t("cp.userApps.limitHint"), { and: <em>{t("cp.userApps.limitHintAnd")}</em> })}
           </p>
         </div>
       </div>
@@ -122,7 +124,7 @@ export function UserApps({ userId, onChanged }: { userId: string; onChanged: () 
                   className="h-3.5 w-3.5 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
                 />
                 <span className="truncate">{app.name}</span>
-                {locked && <span className="ml-auto shrink-0 text-[10px] text-ink-faint">always on</span>}
+                {locked && <span className="ml-auto shrink-0 text-[10px] text-ink-faint">{t("cp.userApps.alwaysOn")}</span>}
               </label>
             );
           })}
@@ -131,16 +133,15 @@ export function UserApps({ userId, onChanged }: { userId: string; onChanged: () 
 
       {restricted && (
         <p className="mt-2 text-[11px] text-ink-faint">
-          Control Panel and About can't be taken away - without Control Panel this account couldn't change its own
-          password or set up a passkey. The admin-only pages inside it stay hidden either way.
+          {t("cp.userApps.alwaysHint")}
         </p>
       )}
 
       <div className="mt-3 flex items-center gap-2">
         <Button className="h-8 px-3 text-xs" loading={saving} disabled={!dirty} onClick={() => void save()}>
-          Save
+          {t("common.save")}
         </Button>
-        {dirty && <span className="text-[11px] text-ink-faint">Unsaved changes</span>}
+        {dirty && <span className="text-[11px] text-ink-faint">{t("cp.userApps.unsaved")}</span>}
       </div>
     </div>
   );

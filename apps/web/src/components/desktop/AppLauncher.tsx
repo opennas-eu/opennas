@@ -96,7 +96,7 @@ export function AppLauncher({ alwaysOpen = false }: { alwaysOpen?: boolean } = {
             </button>
           ))}
           {filtered.length === 0 && (
-            <p className="col-span-full py-10 text-center text-sm text-white/60">No apps found.</p>
+            <p className="col-span-full py-10 text-center text-sm text-white/60">{t("ui.launcher.noApps")}</p>
           )}
         </div>
       </div>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { clsx } from "clsx";
 import { Activity, AlertTriangle, ArrowUpCircle, Bell, Blocks, CalendarClock, Check, Download, FolderCog, FolderLock, FolderSearch, Globe, IdCard, ImageOff, Package, Pencil, Puzzle, RefreshCw, Save, Search, ShieldAlert, ShieldCheck, SlidersHorizontal, Store, Trash2, Upload, X } from "lucide-react";
 import type { AppCategory, AppInstallResult, AppPermission, AppRepo, AppUpdateApplyResponse, AppUpdatesResponse, ManagedApp, ManagedAppsResponse, PendingInstall, RepoApp, RepoCatalogResponse, RepoConfigResponse, RepoSourceStatus } from "@opennas/shared";
@@ -14,8 +14,35 @@ import { confirmDialog } from "../../store/dialogs.ts";
 import { Button, Toggle } from "../ui/controls.tsx";
 import { AppIcon, ManifestIcon } from "../ui/Icon.tsx";
 import { formatRelative } from "../../lib/format.ts";
+import { useLocale, useT, type MessageKey } from "../../i18n/index.ts";
+
+/**
+ * Fill `{name}` slots in a translated sentence with elements (code samples)
+ * rather than text, so the sentence can be reordered per language.
+ */
+function withElements(text: string, parts: Record<string, ReactNode>): ReactNode {
+  return text.split(/\{(\w+)\}/).map((piece, i) =>
+    i % 2 === 1 && piece in parts ? <Fragment key={i}>{parts[piece]}</Fragment> : piece,
+  );
+}
+
+/** Category ids are data; their labels are not. */
+const CATEGORY_LABEL: Record<AppCategory | "all", MessageKey> = {
+  all: "app.center.cat.all",
+  system: "app.center.cat.system",
+  utilities: "app.center.cat.utilities",
+  media: "app.center.cat.media",
+  productivity: "app.center.cat.productivity",
+  developer: "app.center.cat.developer",
+};
+
+export function categoryLabel(t: (k: MessageKey) => string, c: AppCategory | "all"): string {
+  const key = CATEGORY_LABEL[c];
+  return key ? t(key) : c;
+}
 
 export function AppCenter({ embedded = false }: { embedded?: boolean }) {
+  const t = useT();
   const reloadLauncher = useApps((s) => s.load);
   const push = useNotifications((s) => s.push);
   const [managed, setManaged] = useState<ManagedApp[] | null>(null);
@@ -43,7 +70,7 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
 
   async function install(file: File) {
     if (!/\.onpkg$|\.zip$/i.test(file.name)) {
-      push({ level: "warning", title: "Not an app package", body: "Choose a .onpkg file." });
+      push({ level: "warning", title: t("app.center.notPackage"), body: t("app.center.chooseOnpkg") });
       return;
     }
     setBusy(true);
@@ -52,7 +79,7 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
       fd.append("file", file, file.name);
       const res = await fetch(apiUrl("/apps/install"), { method: "POST", body: fd, credentials: "include" });
       const body = (await res.json().catch(() => null)) as AppInstallResult | { message?: string } | null;
-      if (!res.ok) throw new Error((body as { message?: string })?.message ?? "Install failed.");
+      if (!res.ok) throw new Error((body as { message?: string })?.message ?? t("app.center.installFailedFallback"));
       // 202 = the package wants something the admin hasn't granted, or comes from
       // a publisher we don't know yet. Nothing is on disk until they approve it.
       if (body && isPendingInstall(body as AppInstallResult)) {
@@ -60,10 +87,10 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
         return;
       }
       const app = (body as { app: { name: string } }).app;
-      push({ level: "success", title: "App installed", body: `"${app.name}" is ready to open from the launcher.` });
+      push({ level: "success", title: t("app.center.appInstalled"), body: t("app.center.appInstalledBody", { name: app.name }) });
       await reloadAll();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't install app", body: err instanceof Error ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.center.installAppFailed"), body: err instanceof Error ? err.message : t("app.center.failed") });
     } finally {
       setBusy(false);
     }
@@ -74,7 +101,7 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
       await api.post(`/apps/${app.manifest.id}/enabled`, { enabled });
       await reloadAll();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't update app", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.center.updateAppFailed"), body: err instanceof ApiRequestError ? err.message : t("app.center.failed") });
     }
   }
 
@@ -83,24 +110,24 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
       await api.post(`/apps/${a.manifest.id}/trust`, { trusted });
       await reloadAll();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't update trust", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.center.trustFailed"), body: err instanceof ApiRequestError ? err.message : t("app.center.failed") });
     }
   }
 
   async function uninstall(app: ManagedApp) {
     const ok = await confirmDialog({
-      title: `Uninstall "${app.manifest.name}"?`,
-      message: "The app and its stored data are removed.",
-      confirmLabel: "Uninstall",
+      title: t("app.center.uninstallTitle", { name: app.manifest.name }),
+      message: t("app.center.uninstallMessage"),
+      confirmLabel: t("app.center.uninstall"),
       danger: true,
     });
     if (!ok) return;
     try {
       await api.del(`/apps/${app.manifest.id}`);
-      push({ level: "success", title: "App uninstalled", body: app.manifest.name });
+      push({ level: "success", title: t("app.center.uninstalled"), body: app.manifest.name });
       await reloadAll();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't uninstall", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.center.uninstallFailed"), body: err instanceof ApiRequestError ? err.message : t("app.center.failed") });
     }
   }
 
@@ -123,8 +150,8 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
     <div className={clsx("relative flex h-full flex-col", !embedded && "bg-white")}>
       {!embedded && (
         <div className="border-b border-slate-200 px-6 py-4">
-          <h2 className="flex items-center gap-2 text-lg font-semibold text-ink"><Blocks size={20} /> App Center</h2>
-          <p className="text-sm text-ink-faint">Install apps built with the OpenNAS app framework, or manage the ones you've added.</p>
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-ink"><Blocks size={20} /> {t("app.center.title")}</h2>
+          <p className="text-sm text-ink-faint">{t("app.center.subtitle")}</p>
         </div>
       )}
 
@@ -148,10 +175,10 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
           className={`grid place-items-center rounded-2xl border-2 border-dashed p-8 text-center transition ${dragOver ? "border-brand-400 bg-brand-50/70" : "border-slate-300 bg-slate-50"}`}
         >
           <Upload size={28} className="mb-2 text-slate-400" />
-          <p className="text-sm font-medium text-ink-soft">Drop a <code className="rounded bg-slate-200 px-1 text-xs">.onpkg</code> package here</p>
-          <p className="mb-3 text-xs text-ink-faint">or choose one from your computer</p>
+          <p className="text-sm font-medium text-ink-soft">{withElements(t("app.center.dropPackage"), { file: <code className="rounded bg-slate-200 px-1 text-xs">.onpkg</code> })}</p>
+          <p className="mb-3 text-xs text-ink-faint">{t("app.center.orChoose")}</p>
           <Button className="h-9" loading={busy} onClick={() => fileInput.current?.click()}>
-            <Upload size={15} /> Install app
+            <Upload size={15} /> {t("app.center.installApp")}
           </Button>
           <input ref={fileInput} type="file" accept=".onpkg,.zip,application/zip" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) void install(f); e.target.value = ""; }} />
         </div>
@@ -159,12 +186,12 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
         {/* Installed apps + search/filter */}
         <div>
           <div className="mb-2 flex flex-wrap items-center gap-2">
-            <h3 className="text-sm font-semibold text-ink-soft">Installed apps</h3>
+            <h3 className="text-sm font-semibold text-ink-soft">{t("app.center.installedApps")}</h3>
             <span className="flex-1" />
             {(managed?.length ?? 0) > 0 && (
               <div className="relative">
                 <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
-                <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search" className="h-8 w-40 rounded-lg bg-slate-100 pl-8 pr-2 text-sm text-ink placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+                <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t("desktop.search")} className="h-8 w-40 rounded-lg bg-slate-100 pl-8 pr-2 text-sm text-ink placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500" />
               </div>
             )}
           </div>
@@ -173,20 +200,20 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
             <div className="mb-3 flex flex-wrap gap-1.5">
               {categories.map((c) => (
                 <button key={c} onClick={() => setCat(c)} className={clsx("rounded-full px-3 py-1 text-xs font-medium capitalize transition-colors", cat === c ? "bg-brand-600 text-white" : "bg-slate-100 text-ink-faint hover:bg-slate-200")}>
-                  {c}
+                  {categoryLabel(t, c)}
                 </button>
               ))}
             </div>
           )}
 
           {managed === null ? (
-            <p className="text-sm text-ink-faint">Loading...</p>
+            <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>
           ) : managed.length === 0 ? (
             <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-ink-faint">
-              No third-party apps installed yet. Install one above to get started.
+              {t("app.center.noApps")}
             </div>
           ) : filtered.length === 0 ? (
-            <p className="py-6 text-center text-sm text-ink-faint">No apps match your search.</p>
+            <p className="py-6 text-center text-sm text-ink-faint">{t("app.center.noMatch")}</p>
           ) : (
             <div className="space-y-2">
               {filtered.map((a) => (
@@ -195,7 +222,7 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
                   <button
                     onClick={() => setDetail(a)}
                     className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                    title="View details"
+                    title={t("app.center.viewDetails")}
                   >
                   <span className={`grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-gradient-to-br text-white ${a.manifest.iconGradient}`}>
                     <AppIcon app={a.manifest} className="h-5 w-5" />
@@ -204,40 +231,40 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
                     <div className="flex items-center gap-2">
                       <span className="truncate font-medium text-ink-soft">{a.manifest.name}</span>
                       {a.manifest.version && <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-ink-soft">v{a.manifest.version}</span>}
-                      <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium capitalize text-ink-soft">{a.manifest.category}</span>
+                      <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium capitalize text-ink-soft">{categoryLabel(t, a.manifest.category)}</span>
                       {a.verified ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700"><ShieldCheck size={11} /> Verified</span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700"><ShieldCheck size={11} /> {t("app.center.verified")}</span>
                       ) : a.manifest.signed ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-medium text-brand-700"><ShieldCheck size={11} /> Signed</span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-medium text-brand-700"><ShieldCheck size={11} /> {t("app.center.signed")}</span>
                       ) : (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700"><ShieldAlert size={11} /> Unsigned</span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700"><ShieldAlert size={11} /> {t("app.center.unsigned")}</span>
                       )}
-                      {!a.enabled && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">Disabled</span>}
+                      {!a.enabled && <span className="rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700">{t("common.disabled")}</span>}
                     </div>
                     <div className="truncate text-xs text-ink-faint">
-                      {a.manifest.author ? `${a.manifest.author} - ` : ""}{a.manifest.description || "No description"}
-                      {a.manifest.publisherFingerprint ? ` - key ${a.manifest.publisherFingerprint.slice(0, 12)}...` : ""}
+                      {a.manifest.author ? `${a.manifest.author} - ` : ""}{a.manifest.description || t("app.center.noDescription")}
+                      {a.manifest.publisherFingerprint ? ` - ${t("app.center.keyShort", { key: a.manifest.publisherFingerprint.slice(0, 12) })}` : ""}
                     </div>
                   </div>
                   </button>
                   {a.manifest.signed && (
                     a.verified ? (
-                      <button onClick={() => void setTrust(a, false)} className="rounded-md px-2 py-1 text-xs font-medium text-emerald-700 transition hover:bg-emerald-50" title="Untrust this publisher">Trusted</button>
+                      <button onClick={() => void setTrust(a, false)} className="rounded-md px-2 py-1 text-xs font-medium text-emerald-700 transition hover:bg-emerald-50" title={t("app.center.untrustHint")}>{t("app.center.trusted")}</button>
                     ) : (
-                      <button onClick={() => void setTrust(a, true)} className="rounded-md px-2 py-1 text-xs font-medium text-brand-600 transition hover:bg-brand-50" title="Trust this publisher's key">Trust publisher</button>
+                      <button onClick={() => void setTrust(a, true)} className="rounded-md px-2 py-1 text-xs font-medium text-brand-600 transition hover:bg-brand-50" title={t("app.center.trustHint")}>{t("app.center.trustPublisher")}</button>
                     )
                   )}
                   {(a.manifest.settings?.length ?? 0) > 0 && (
                     <Button
                       variant="ghost"
                       className="h-8 px-2"
-                      title={`${a.manifest.name} settings`}
+                      title={t("app.appSettings.title", { name: a.manifest.name })}
                       onClick={() => setSettingsFor((cur) => (cur === a.manifest.id ? null : a.manifest.id))}
                     >
                       <SlidersHorizontal size={15} />
                     </Button>
                   )}
-                  <Toggle checked={a.enabled} onChange={(v) => void setEnabled(a, v)} label={`Enable ${a.manifest.name}`} />
+                  <Toggle checked={a.enabled} onChange={(v) => void setEnabled(a, v)} label={t("app.center.enableItem", { name: a.manifest.name })} />
                   <Button variant="ghost" className="h-8 px-2 text-rose-600 hover:bg-rose-50" onClick={() => uninstall(a)}>
                     <Trash2 size={15} />
                   </Button>
@@ -260,12 +287,14 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
 
         {/* Developer note */}
         <div className="rounded-xl bg-brand-50/60 p-4 text-sm text-ink-soft ring-1 ring-brand-100">
-          <p className="mb-1 flex items-center gap-2 font-semibold text-brand-700"><Puzzle size={16} /> Build your own app</p>
+          <p className="mb-1 flex items-center gap-2 font-semibold text-brand-700"><Puzzle size={16} /> {t("app.center.buildOwn")}</p>
           <p className="text-xs text-ink-faint">
-            An OpenNAS app contains HTML, JavaScript, CSS and an <code className="rounded bg-white px-1">opennas-app.json</code> manifest, loaded with{" "}
-            <code className="rounded bg-white px-1">&lt;script src="/app-sdk/opennas.js"&gt;</code>. Zip your files into a{" "}
-            <code className="rounded bg-white px-1">.onpkg</code> and install it here. See the developer guide in the{" "}
-            <code className="rounded bg-white px-1">@opennas/app-sdk</code> README.
+            {withElements(t("app.center.buildOwnBody"), {
+              manifest: <code className="rounded bg-white px-1">opennas-app.json</code>,
+              script: <code className="rounded bg-white px-1">&lt;script src="/app-sdk/opennas.js"&gt;</code>,
+              onpkg: <code className="rounded bg-white px-1">.onpkg</code>,
+              sdk: <code className="rounded bg-white px-1">@opennas/app-sdk</code>,
+            })}
           </p>
         </div>
       </div>
@@ -294,52 +323,50 @@ export function AppCenter({ embedded = false }: { embedded?: boolean }) {
  * read alike. Most apps need neither: `shares.pick()` asks you for one folder
  * at the moment it's needed and appears in no manifest at all.
  */
-const PERMISSION_INFO: Record<AppPermission, { label: string; detail: string; icon: typeof Bell }> = {
+const PERMISSION_INFO: Record<AppPermission, { label: MessageKey; detail: MessageKey; icon: typeof Bell }> = {
   notifications: {
-    label: "Send you notifications",
-    detail: "Post messages to your notification centre.",
+    label: "app.center.perm.notifications",
+    detail: "app.center.perm.notificationsDetail",
     icon: Bell,
   },
   storage: {
-    label: "Save its own settings",
-    detail: "Keep small values (preferences, progress) for your account.",
+    label: "app.center.perm.storage",
+    detail: "app.center.perm.storageDetail",
     icon: Save,
   },
   user: {
-    label: "See who you are",
-    detail: "Read your username, display name and role. This does not include your password or email.",
+    label: "app.center.perm.user",
+    detail: "app.center.perm.userDetail",
     icon: IdCard,
   },
   files: {
-    label: "Use a private folder",
-    detail: "Read and write files in a folder of its own. It cannot reach your shared folders.",
+    label: "app.center.perm.files",
+    detail: "app.center.perm.filesDetail",
     icon: FolderLock,
   },
   "shares:read": {
-    label: "Read all your shared folders",
-    detail:
-      "Read all folders you have access to without asking each time. Only allow this if the app needs access to all your files.",
+    label: "app.center.perm.sharesRead",
+    detail: "app.center.perm.sharesReadDetail",
     icon: FolderSearch,
   },
   "shares:write": {
-    label: "Change files in all your shared folders",
-    detail:
-      "Write anywhere you can, without asking each time. The widest thing an app can be given.",
+    label: "app.center.perm.sharesWrite",
+    detail: "app.center.perm.sharesWriteDetail",
     icon: FolderCog,
   },
   system: {
-    label: "Read system stats",
-    detail: "View CPU, memory, storage and network usage. This does not allow changes or access to the process list.",
+    label: "app.center.perm.system",
+    detail: "app.center.perm.systemDetail",
     icon: Activity,
   },
   fetch: {
-    label: "Contact the internet",
-    detail: "Connect to the hosts listed below. Connections to your NAS and local network are blocked.",
+    label: "app.center.perm.fetch",
+    detail: "app.center.perm.fetchDetail",
     icon: Globe,
   },
   schedule: {
-    label: "Run on a schedule",
-    detail: "Run background tasks while the app is closed, at most once every 15 minutes. Tasks use the app's existing permissions.",
+    label: "app.center.perm.schedule",
+    detail: "app.center.perm.scheduleDetail",
     icon: CalendarClock,
   },
 };
@@ -350,6 +377,7 @@ const PERMISSION_INFO: Record<AppPermission, { label: string; detail: string; ic
  * cancelling discards it, and the token expires on its own either way.
  */
 function PermissionConsent({ pending, onSettled }: { pending: PendingInstall; onSettled: (installed: boolean) => Promise<void> }) {
+  const t = useT();
   const push = useNotifications((s) => s.push);
   const [busy, setBusy] = useState<"install" | "cancel" | null>(null);
 
@@ -359,12 +387,12 @@ function PermissionConsent({ pending, onSettled }: { pending: PendingInstall; on
       await api.post("/apps/install/confirm", { token: pending.token });
       push({
         level: "success",
-        title: pending.isUpdate ? "App updated" : "App installed",
+        title: pending.isUpdate ? t("app.center.appUpdated") : t("app.center.appInstalled"),
         body: `${pending.name} v${pending.version}`,
       });
       await onSettled(true);
     } catch (err) {
-      push({ level: "warning", title: "Couldn't install", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.center.installShortFailed"), body: err instanceof ApiRequestError ? err.message : t("app.center.failed") });
       await onSettled(false);
     } finally {
       setBusy(null);
@@ -385,19 +413,18 @@ function PermissionConsent({ pending, onSettled }: { pending: PendingInstall; on
 
   const wants = pending.permissions;
   const isNew = (p: AppPermission) => pending.newPermissions.includes(p);
-  const verb = pending.isUpdate ? "Update" : "Install";
 
   return (
     <div className="animate-fade-in absolute inset-0 z-40 flex flex-col bg-slate-950/50 p-4 backdrop-blur-sm">
       <div className="mx-auto flex max-h-full w-full max-w-lg flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-slate-900/10">
         <div className="border-b border-slate-200 p-5">
           <h2 className="text-lg font-semibold text-ink">
-            {verb} '{pending.name}'?
+            {t(pending.isUpdate ? "app.center.updateTitle" : "app.center.installTitle", { name: pending.name })}
           </h2>
           <p className="text-sm text-ink-faint">
             v{pending.version}
             {pending.author ? ` - ${pending.author}` : ""}
-            {pending.isUpdate ? " - update to an installed app" : ""}
+            {pending.isUpdate ? ` - ${t("app.center.isUpdate")}` : ""}
           </p>
         </div>
 
@@ -406,23 +433,22 @@ function PermissionConsent({ pending, onSettled }: { pending: PendingInstall; on
           {pending.verified ? (
             <div className="flex items-start gap-2 rounded-xl bg-emerald-50 px-3 py-2.5 text-xs text-emerald-800 ring-1 ring-emerald-200">
               <ShieldCheck size={15} className="mt-0.5 shrink-0" />
-              <span>Signed by a publisher you've already trusted.</span>
+              <span>{t("app.center.signedTrusted")}</span>
             </div>
           ) : pending.signed ? (
             <div className="flex items-start gap-2 rounded-xl bg-amber-50 px-3 py-2.5 text-xs text-amber-800 ring-1 ring-amber-200">
               <ShieldAlert size={15} className="mt-0.5 shrink-0" />
               <span>
-                Signed, but by a publisher you haven't trusted yet
-                {pending.publisherFingerprint ? ` (key ${pending.publisherFingerprint.slice(0, 12)}...)` : ""}. You can trust
-                them from the installed-apps list afterwards.
+                {pending.publisherFingerprint
+                  ? t("app.center.signedUntrustedKey", { key: pending.publisherFingerprint.slice(0, 12) })
+                  : t("app.center.signedUntrusted")}
               </span>
             </div>
           ) : (
             <div className="flex items-start gap-2 rounded-xl bg-rose-50 px-3 py-2.5 text-xs text-rose-800 ring-1 ring-rose-200">
               <ShieldAlert size={15} className="mt-0.5 shrink-0" />
               <span>
-                <strong className="font-semibold">Not signed.</strong> Nothing proves who built this package or that it
-                hasn't been altered. Only install packages you got from somewhere you trust.
+                <strong className="font-semibold">{t("app.center.notSigned")}</strong> {t("app.center.notSignedBody")}
               </span>
             </div>
           )}
@@ -433,11 +459,11 @@ function PermissionConsent({ pending, onSettled }: { pending: PendingInstall; on
 
           <div>
             <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-faint">
-              {wants.length === 0 ? "Permissions" : `This app will be able to`}
+              {wants.length === 0 ? t("app.center.permissions") : t("app.center.willBeAbleTo")}
             </h3>
             {wants.length === 0 ? (
               <p className="rounded-xl bg-slate-50 px-3 py-2.5 text-xs text-ink-faint ring-1 ring-slate-200/70">
-                This app requests no permissions. It runs in a sandbox without access to OpenNAS.
+                {t("app.center.noPermissions")}
               </p>
             ) : (
               <ul className="space-y-2">
@@ -456,14 +482,14 @@ function PermissionConsent({ pending, onSettled }: { pending: PendingInstall; on
                       <Icon size={16} className={clsx("mt-0.5 shrink-0", fresh ? "text-amber-700" : "text-ink-faint")} />
                       <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-1.5 text-sm font-medium text-ink-soft">
-                          {info?.label ?? perm}
+                          {info ? t(info.label) : perm}
                           {fresh && (
                             <span className="rounded-full bg-amber-200/70 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-900">
-                              New
+                              {t("app.center.new")}
                             </span>
                           )}
                         </div>
-                        <p className="text-xs text-ink-faint">{info?.detail ?? "An OpenNAS capability."}</p>
+                        <p className="text-xs text-ink-faint">{info ? t(info.detail) : t("app.center.unknownPermission")}</p>
                         {/* "can reach the internet" is meaningless without the list. */}
                         {perm === "fetch" && (
                           <ul className="mt-1.5 flex flex-wrap gap-1">
@@ -484,17 +510,17 @@ function PermissionConsent({ pending, onSettled }: { pending: PendingInstall; on
 
           {pending.isUpdate && pending.newPermissions.length > 0 && (
             <p className="rounded-xl bg-amber-50 px-3 py-2.5 text-xs text-amber-800 ring-1 ring-amber-200">
-              This update asks for more than the version you installed. Automatic updates skipped it for that reason.
+              {t("app.center.wantsMore")}
             </p>
           )}
         </div>
 
         <div className="flex justify-end gap-2 border-t border-slate-200 p-4">
           <Button variant="ghost" disabled={busy !== null} onClick={cancel}>
-            Cancel
+            {t("common.cancel")}
           </Button>
           <Button loading={busy === "install"} disabled={busy !== null} onClick={confirm}>
-            {verb}
+            {pending.isUpdate ? t("app.center.update") : t("app.center.install")}
           </Button>
         </div>
       </div>
@@ -509,6 +535,7 @@ function PermissionConsent({ pending, onSettled }: { pending: PendingInstall; on
  * verification path as a fresh install, keeping the app's data and enabled state.
  */
 function UpdatesPanel({ hasApps, rev, onApplied, onPending }: { hasApps: boolean; rev: number; onApplied: () => Promise<void>; onPending: (p: PendingInstall[]) => void }) {
+  const t = useT();
   const push = useNotifications((s) => s.push);
   const [state, setState] = useState<AppUpdatesResponse | null>(null);
   const [checking, setChecking] = useState(false);
@@ -537,17 +564,17 @@ function UpdatesPanel({ hasApps, rev, onApplied, onPending }: { hasApps: boolean
       if (res.updated.length > 0) {
         push({
           level: "success",
-          title: res.updated.length === 1 ? "App updated" : `${res.updated.length} apps updated`,
+          title: t("app.center.appsUpdated", { count: res.updated.length }),
           body: res.updated.map((u) => `${u.name} → v${u.version}`).join(", "),
         });
       }
       for (const f of res.failed) {
-        push({ level: "warning", title: "Couldn't update app", body: `${f.id}: ${f.message}` });
+        push({ level: "warning", title: t("app.center.updateAppFailed"), body: `${f.id}: ${f.message}` });
       }
       await load(true);
       await onApplied();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't update", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.center.updateShortFailed"), body: err instanceof ApiRequestError ? err.message : t("app.center.failed") });
     } finally {
       setBusy(null);
     }
@@ -558,7 +585,7 @@ function UpdatesPanel({ hasApps, rev, onApplied, onPending }: { hasApps: boolean
     try {
       await api.put("/apps/repo/updates/auto", { enabled });
     } catch (err) {
-      push({ level: "warning", title: "Couldn't change setting", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.center.settingFailed"), body: err instanceof ApiRequestError ? err.message : t("app.center.failed") });
       await load();
     }
   }
@@ -577,25 +604,25 @@ function UpdatesPanel({ hasApps, rev, onApplied, onPending }: { hasApps: boolean
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink-soft">
           <ArrowUpCircle size={15} className={pending.length > 0 ? "text-brand-600" : undefined} />
-          {pending.length > 0 ? `${pending.length} update${pending.length === 1 ? "" : "s"} available` : "Apps are up to date"}
+          {pending.length > 0 ? t("app.center.updatesAvailable", { count: pending.length }) : t("app.center.upToDate")}
         </h3>
         <span className="flex-1" />
         {pending.length > 1 && (
           <Button className="h-8 px-2.5 text-xs" loading={busy === "all"} disabled={working} onClick={() => void apply()}>
-            <Download size={13} /> Update all
+            <Download size={13} /> {t("app.center.updateAll")}
           </Button>
         )}
         <button
           onClick={() => void load(true)}
           className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-200"
-          title="Check for updates now"
+          title={t("app.center.checkNow")}
         >
           <RefreshCw size={15} className={checking ? "animate-spin" : ""} />
         </button>
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-ink-faint">
-        <span>Checked {formatRelative(state.checkedAt)}</span>
+        <span>{t("app.center.checked", { when: formatRelative(state.checkedAt) })}</span>
         <label className="flex cursor-pointer items-center gap-1.5">
           <input
             type="checkbox"
@@ -603,13 +630,13 @@ function UpdatesPanel({ hasApps, rev, onApplied, onPending }: { hasApps: boolean
             onChange={(e) => void setAuto(e.target.checked)}
             className="h-3.5 w-3.5 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
           />
-          Install updates automatically
+          {t("app.center.autoUpdate")}
         </label>
       </div>
 
       {!state.repoReachable && (
         <p className="mb-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 ring-1 ring-amber-200">
-          The last repository check failed. This list may be out of date.
+          {t("app.center.repoCheckFailed")}
         </p>
       )}
 
@@ -624,22 +651,22 @@ function UpdatesPanel({ hasApps, rev, onApplied, onPending }: { hasApps: boolean
                 <div className="flex items-center gap-1.5">
                   <span className="truncate text-sm font-medium text-ink-soft">{u.name}</span>
                   {u.signed ? (
-                    <ShieldCheck size={12} className="shrink-0 text-emerald-600" aria-label="Signed" />
+                    <ShieldCheck size={12} className="shrink-0 text-emerald-600" aria-label={t("app.center.signed")} />
                   ) : (
-                    <ShieldAlert size={12} className="shrink-0 text-amber-500" aria-label="Unsigned" />
+                    <ShieldAlert size={12} className="shrink-0 text-amber-500" aria-label={t("app.center.unsigned")} />
                   )}
                 </div>
                 <p className="truncate text-xs text-ink-faint">
                   v{u.installedVersion} → <span className="font-medium text-brand-700">v{u.availableVersion}</span>
                   {u.newPermissions.length > 0 && (
-                    <span className="ml-1.5 text-amber-700" title={`Wants: ${u.newPermissions.join(", ")}`}>
-                      - needs approval
+                    <span className="ml-1.5 text-amber-700" title={t("app.center.wants", { list: u.newPermissions.join(", ") })}>
+                      - {t("app.center.needsApproval")}
                     </span>
                   )}
                 </p>
               </div>
               <Button className="h-8 px-2.5 text-xs" loading={busy === u.id} disabled={working} onClick={() => void apply([u.id])}>
-                <Download size={13} /> Update
+                <Download size={13} /> {t("app.center.update")}
               </Button>
             </div>
           ))}
@@ -650,6 +677,8 @@ function UpdatesPanel({ hasApps, rev, onApplied, onPending }: { hasApps: boolean
 }
 
 function RepoBrowser({ onInstalled, onPending }: { onInstalled: () => Promise<void>; onPending: (p: PendingInstall) => void }) {
+  const t = useT();
+  const locale = useLocale();
   const push = useNotifications((s) => s.push);
   const [repos, setRepos] = useState<AppRepo[]>([]);
   const [sources, setSources] = useState<RepoSourceStatus[]>([]);
@@ -672,7 +701,7 @@ function RepoBrowser({ onInstalled, onPending }: { onInstalled: () => Promise<vo
     } catch (err) {
       setApps([]);
       setSources([]);
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't reach the repository.");
+      setError(err instanceof ApiRequestError ? err.message : t("app.center.repoUnreachable"));
     } finally {
       setLoading(false);
     }
@@ -688,11 +717,11 @@ function RepoBrowser({ onInstalled, onPending }: { onInstalled: () => Promise<vo
         onPending(res.pending);
         return;
       }
-      push({ level: "success", title: "App installed", body: `"${a.name}" - find it in the launcher.` });
+      push({ level: "success", title: t("app.center.appInstalled"), body: t("app.center.appInstalledFromRepo", { name: a.name }) });
       await load();
       await onInstalled();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't install", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.center.installShortFailed"), body: err instanceof ApiRequestError ? err.message : t("app.center.failed") });
     } finally {
       setBusy(null);
     }
@@ -707,19 +736,19 @@ function RepoBrowser({ onInstalled, onPending }: { onInstalled: () => Promise<vo
     <section className="rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink-soft">
-          <Store size={15} /> App {repos.length === 1 ? "repository" : "repositories"}
+          <Store size={15} /> {t("app.center.repoHeading", { count: repos.length })}
         </h3>
         <button
           onClick={() => setEditing((v) => !v)}
           className="inline-flex items-center gap-1 truncate rounded-md bg-white px-2 py-1 text-xs text-ink-faint ring-1 ring-slate-200 hover:text-ink-soft"
-          title="Manage repositories"
+          title={t("app.center.manageRepos")}
         >
           <span className="max-w-[220px] truncate">
             {repos.length === 0
-              ? "none configured"
+              ? t("app.center.noReposConfigured")
               : repos.length === 1
                 ? repos[0]!.url.replace(/^https?:\/\//, "")
-                : `${repos.length} configured`}
+                : t("app.center.reposConfigured", { count: repos.length })}
           </span>
           <Pencil size={11} />
         </button>
@@ -728,17 +757,17 @@ function RepoBrowser({ onInstalled, onPending }: { onInstalled: () => Promise<vo
             className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700 ring-1 ring-amber-200"
             title={unreachable.map((s) => s.url).join(", ")}
           >
-            <AlertTriangle size={10} /> {unreachable.length} unreachable
+            <AlertTriangle size={10} /> {t("app.center.reposUnreachable", { count: unreachable.length })}
           </span>
         )}
         <span className="flex-1" />
         {(apps?.length ?? 0) > 0 && (
           <div className="relative">
             <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
-            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search" className="h-8 w-32 rounded-lg bg-white pl-8 pr-2 text-sm text-ink ring-1 ring-slate-200 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500" />
+            <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t("desktop.search")} className="h-8 w-32 rounded-lg bg-white pl-8 pr-2 text-sm text-ink ring-1 ring-slate-200 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500" />
           </div>
         )}
-        <button onClick={() => void load()} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-200" title="Refresh">
+        <button onClick={() => void load()} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-200" title={t("desktop.refresh")}>
           <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
         </button>
       </div>
@@ -748,11 +777,11 @@ function RepoBrowser({ onInstalled, onPending }: { onInstalled: () => Promise<vo
       )}
 
       {apps === null ? (
-        <p className="text-sm text-ink-faint">Loading the repository...</p>
+        <p className="text-sm text-ink-faint">{t("app.center.loadingRepo")}</p>
       ) : error ? (
         <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700 ring-1 ring-amber-200">{error}</p>
       ) : filtered.length === 0 ? (
-        <p className="text-sm text-ink-faint">{apps.length === 0 ? "No apps published to this repository yet." : "No apps match your search."}</p>
+        <p className="text-sm text-ink-faint">{apps.length === 0 ? t("app.center.noRepoApps") : t("app.center.noMatch")}</p>
       ) : (
         <div className="grid gap-2 sm:grid-cols-2">
           {filtered.map((a) => (
@@ -765,23 +794,27 @@ function RepoBrowser({ onInstalled, onPending }: { onInstalled: () => Promise<vo
                   <span className="truncate text-sm font-medium text-ink-soft">{a.name}</span>
                   {a.version && <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-[10px] text-ink-faint">v{a.version}</span>}
                   {a.signed ? (
-                    <ShieldCheck size={12} className="shrink-0 text-emerald-600" aria-label="Signed" />
+                    <ShieldCheck size={12} className="shrink-0 text-emerald-600" aria-label={t("app.center.signed")} />
                   ) : (
-                    <ShieldAlert size={12} className="shrink-0 text-amber-500" aria-label="Unsigned" />
+                    <ShieldAlert size={12} className="shrink-0 text-amber-500" aria-label={t("app.center.unsigned")} />
                   )}
                 </div>
-                <p className="truncate text-xs text-ink-faint">{a.author ? `${a.author} - ` : ""}{a.description || "No description"}</p>
+                <p className="truncate text-xs text-ink-faint">{a.author ? `${a.author} - ` : ""}{a.description || t("app.center.noDescription")}</p>
                 {a.permissions.length > 0 && (
                   <p className="truncate text-[11px] text-ink-faint" title={a.permissions.join(", ")}>
-                    Wants: {a.permissions.map((perm) => PERMISSION_INFO[perm]?.label ?? perm).join(", ").toLowerCase()}
+                    {(() => {
+                      const list = a.permissions.map((perm) => (PERMISSION_INFO[perm] ? t(PERMISSION_INFO[perm].label) : perm)).join(", ");
+                      // Lowercasing reads naturally in English; it would mangle German nouns.
+                      return t("app.center.wants", { list: locale === "en" ? list.toLowerCase() : list });
+                    })()}
                   </p>
                 )}
               </div>
               {a.installed ? (
-                <span className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-emerald-700"><Check size={13} /> Installed</span>
+                <span className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-emerald-700"><Check size={13} /> {t("app.center.installed")}</span>
               ) : (
                 <Button className="h-8 px-2.5 text-xs" loading={busy === a.id} onClick={() => void install(a)}>
-                  <Download size={13} /> Install
+                  <Download size={13} /> {t("app.center.install")}
                 </Button>
               )}
             </div>
@@ -793,6 +826,7 @@ function RepoBrowser({ onInstalled, onPending }: { onInstalled: () => Promise<vo
 }
 
 function AppDetailModal({ app, onClose }: { app: ManagedApp; onClose: () => void }) {
+  const t = useT();
   const m = app.manifest;
   const shots = (m.screenshots ?? []).map((s) => appContentUrl(m.id, s));
   return (
@@ -811,40 +845,40 @@ function AppDetailModal({ app, onClose }: { app: ManagedApp; onClose: () => void
               {m.version ? `v${m.version}` : ""}{m.author ? `${m.version ? " - " : ""}${m.author}` : ""}
             </p>
             <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium capitalize text-ink-soft">{m.category}</span>
+              <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-medium capitalize text-ink-soft">{categoryLabel(t, m.category)}</span>
               {app.verified ? (
-                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700"><ShieldCheck size={11} /> Verified</span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-700"><ShieldCheck size={11} /> {t("app.center.verified")}</span>
               ) : m.signed ? (
-                <span className="inline-flex items-center gap-1 rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-medium text-brand-700"><ShieldCheck size={11} /> Signed</span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-brand-100 px-2 py-0.5 text-[10px] font-medium text-brand-700"><ShieldCheck size={11} /> {t("app.center.signed")}</span>
               ) : (
-                <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700"><ShieldAlert size={11} /> Unsigned</span>
+                <span className="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-medium text-amber-700"><ShieldAlert size={11} /> {t("app.center.unsigned")}</span>
               )}
             </div>
           </div>
-          <button onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft hover:bg-slate-100" title="Close"><X size={18} /></button>
+          <button onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft hover:bg-slate-100" title={t("desktop.close")}><X size={18} /></button>
         </div>
 
         <div className="opennas-scroll min-h-0 flex-1 space-y-4 overflow-auto p-5">
           {shots.length > 0 ? (
             <div className="opennas-scroll -mx-1 flex gap-3 overflow-x-auto px-1 pb-1">
               {shots.map((src, i) => (
-                <img key={i} src={src} alt={`${m.name} screenshot ${i + 1}`} className="h-52 shrink-0 rounded-xl bg-slate-100 object-cover ring-1 ring-slate-200/70" loading="lazy" />
+                <img key={i} src={src} alt={t("app.center.screenshotAlt", { name: m.name, n: i + 1 })} className="h-52 shrink-0 rounded-xl bg-slate-100 object-cover ring-1 ring-slate-200/70" loading="lazy" />
               ))}
             </div>
           ) : (
             <div className="flex items-center gap-2 rounded-xl bg-slate-50 px-4 py-3 text-xs text-ink-faint ring-1 ring-slate-200/70">
-              <ImageOff size={14} /> This app didn't include any screenshots.
+              <ImageOff size={14} /> {t("app.center.noScreenshots")}
             </div>
           )}
 
           <div>
-            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-faint">About</h3>
-            <p className="whitespace-pre-wrap text-sm leading-relaxed text-ink-soft">{m.description || "No description provided."}</p>
+            <h3 className="mb-1 text-xs font-semibold uppercase tracking-wide text-ink-faint">{t("app.center.about")}</h3>
+            <p className="whitespace-pre-wrap text-sm leading-relaxed text-ink-soft">{m.description || t("app.center.noDescriptionProvided")}</p>
           </div>
 
           {(m.permissions?.length ?? 0) > 0 && (
             <div>
-              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">Permissions</h3>
+              <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-ink-faint">{t("app.center.permissions")}</h3>
               <div className="flex flex-wrap gap-1.5">
                 {m.permissions!.map((p) => (
                   <span key={p} className="rounded-md bg-slate-100 px-2 py-1 text-xs text-ink-soft">{p}</span>
@@ -854,10 +888,10 @@ function AppDetailModal({ app, onClose }: { app: ManagedApp; onClose: () => void
           )}
 
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
-            <dt className="text-ink-faint">App ID</dt>
+            <dt className="text-ink-faint">{t("app.center.appId")}</dt>
             <dd className="font-mono text-ink-soft">{m.id}</dd>
             {m.publisherFingerprint && (<>
-              <dt className="text-ink-faint">Publisher key</dt>
+              <dt className="text-ink-faint">{t("app.center.publisherKey")}</dt>
               <dd className="break-all font-mono text-ink-soft">{m.publisherFingerprint}</dd>
             </>)}
           </dl>

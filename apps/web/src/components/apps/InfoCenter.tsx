@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { Cpu, HardDrive, MemoryStick, Network, Server, Thermometer } from "lucide-react";
 import type { DiskVolume, SystemStaticInfo } from "@opennas/shared";
+import { useT } from "../../i18n/index.ts";
 import { api } from "../../lib/api.ts";
 import { useSystem } from "../../store/system.ts";
 import { formatBytes, formatUptime } from "../../lib/format.ts";
 
 export function InfoCenter() {
+  const t = useT();
   const liveInfo = useSystem((s) => s.info);
   const latest = useSystem((s) => s.latest);
   const [info, setInfo] = useState<SystemStaticInfo | null>(liveInfo);
@@ -25,47 +27,47 @@ export function InfoCenter() {
           <Server size={24} />
         </span>
         <div>
-          <h2 className="text-lg font-semibold text-ink">{info?.hostname ?? "This server"}</h2>
+          <h2 className="text-lg font-semibold text-ink">{info?.hostname ?? t("app.info.thisServer")}</h2>
           <p className="text-sm text-ink-faint">
-            {info ? `${info.os.distro} ${info.os.release} - ${info.os.arch}` : "Loading..."}
+            {info ? `${info.os.distro} ${info.os.release} - ${info.os.arch}` : t("desktop.loading")}
           </p>
         </div>
       </header>
 
       <div className="grid gap-3 sm:grid-cols-2">
-        <InfoCard icon={<Cpu size={18} />} title="Processor">
+        <InfoCard icon={<Cpu size={18} />} title={t("dash.processor")}>
           <div className="font-medium text-ink-soft">{info?.cpu.brand ?? "-"}</div>
           <div className="text-ink-faint">
-            {info ? `${info.cpu.physicalCores} cores / ${info.cpu.cores} threads - ${info.cpu.speedGHz} GHz` : ""}
+            {info ? t("app.info.coresThreads", { cores: info.cpu.physicalCores, threads: info.cpu.cores, ghz: info.cpu.speedGHz }) : ""}
           </div>
         </InfoCard>
 
-        <InfoCard icon={<MemoryStick size={18} />} title="Memory">
+        <InfoCard icon={<MemoryStick size={18} />} title={t("dash.memory")}>
           <div className="font-medium text-ink-soft">{info ? formatBytes(info.memoryTotalBytes) : "-"}</div>
           <div className="text-ink-faint">
-            {latest ? `${formatBytes(latest.memory.usedBytes)} in use` : "installed"}
+            {latest ? t("app.info.inUse", { used: formatBytes(latest.memory.usedBytes) }) : t("app.info.installed")}
           </div>
         </InfoCard>
 
-        <InfoCard icon={<Thermometer size={18} />} title="Temperature">
-          <div className="font-medium text-ink-soft">{temp != null ? `${temp} °C` : "Not available"}</div>
-          <div className="text-ink-faint">CPU package</div>
+        <InfoCard icon={<Thermometer size={18} />} title={t("dash.temperature")}>
+          <div className="font-medium text-ink-soft">{temp != null ? `${temp} °C` : t("app.info.notAvailable")}</div>
+          <div className="text-ink-faint">{t("app.info.cpuPackage")}</div>
         </InfoCard>
 
-        <InfoCard icon={<Network size={18} />} title="Uptime">
+        <InfoCard icon={<Network size={18} />} title={t("dash.uptime")}>
           <div className="font-medium text-ink-soft">
             {latest ? formatUptime(latest.uptimeSeconds) : info ? formatUptime(info.uptimeSeconds) : "-"}
           </div>
-          <div className="text-ink-faint">since last boot</div>
+          <div className="text-ink-faint">{t("app.info.sinceBoot")}</div>
         </InfoCard>
       </div>
 
       <section>
         <h3 className="mb-2 flex items-center gap-2 text-sm font-semibold text-ink-soft">
-          <HardDrive size={16} /> Storage volumes
+          <HardDrive size={16} /> {t("app.info.volumes")}
         </h3>
         <div className="space-y-2.5">
-          {disks.length === 0 && <p className="text-sm text-ink-faint">No volumes reported.</p>}
+          {disks.length === 0 && <p className="text-sm text-ink-faint">{t("dash.noVolumes")}</p>}
           {disks.map((d) => (
             <div key={d.mount} className="rounded-xl bg-slate-50 p-3 ring-1 ring-slate-200/70">
               <div className="mb-1.5 flex items-baseline justify-between">

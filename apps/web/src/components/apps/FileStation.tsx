@@ -44,6 +44,7 @@ import { ContextMenu, type MenuItem } from "./ContextMenu.tsx";
 import { FilePreview } from "./FilePreview.tsx";
 import { RecycleBin } from "./RecycleBin.tsx";
 import { ShareLinkDialog, ShareLinksManager } from "./ShareLinks.tsx";
+import { useLocale, useT } from "../../i18n/index.ts";
 
 type SortKey = "name" | "size" | "modified";
 type ClipKind = "copy" | "cut";
@@ -65,6 +66,7 @@ function isPreviewable(e: FileEntry): boolean {
 }
 
 export function FileStation() {
+  const t = useT();
   const [path, setPath] = useState(() => useIntents.getState().take("file-station") ?? "/");
   const [listing, setListing] = useState<FileListResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -104,10 +106,11 @@ export function FileStation() {
       setSelected(new Set());
       setAnchor(null);
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Could not open folder.");
+      setError(err instanceof ApiRequestError ? err.message : t("app.files.openFailed"));
     } finally {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => { void load("/"); }, [load]);
@@ -194,17 +197,17 @@ export function FileStation() {
       setCreating(false);
       await load(path);
     } catch (err) {
-      push({ level: "warning", title: "Couldn't create folder", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.files.createFolderFailed"), body: err instanceof ApiRequestError ? err.message : t("app.files.failed") });
     }
   }
 
   async function createTextFile() {
     const raw = await promptDialog({
-      title: "New text file",
-      message: "Create an empty text file and open it for editing.",
-      confirmLabel: "Create",
-      defaultValue: "untitled.txt",
-      placeholder: "untitled.txt",
+      title: t("app.files.newTextFile"),
+      message: t("app.files.newTextFileHint"),
+      confirmLabel: t("common.create"),
+      defaultValue: t("app.files.untitledFile"),
+      placeholder: t("app.files.untitledFile"),
     });
     const base = raw?.trim();
     if (!base) return;
@@ -224,7 +227,7 @@ export function FileStation() {
       await load(path);
       openPreview({ name, type: "file", sizeBytes: 0, modifiedAt: new Date().toISOString(), mime: null }, true);
     } catch (err) {
-      push({ level: "warning", title: "Couldn't create file", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.files.createFileFailed"), body: err instanceof ApiRequestError ? err.message : t("app.files.failed") });
     }
   }
 
@@ -242,16 +245,16 @@ export function FileStation() {
       await api.post("/files/rename", { path: join(from), newName: next });
       await load(path);
     } catch (err) {
-      push({ level: "warning", title: "Rename failed", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.files.renameFailed"), body: err instanceof ApiRequestError ? err.message : t("app.files.failed") });
     }
   }
 
   async function deleteEntries(entries: FileEntry[]) {
     if (entries.length === 0) return;
     const ok = await confirmDialog({
-      title: entries.length === 1 ? `Delete "${entries[0]!.name}"?` : `Delete ${entries.length} items?`,
-      message: "Moved to the Recycle Bin - you can restore it from there.",
-      confirmLabel: "Delete",
+      title: entries.length === 1 ? t("app.files.deleteOne", { name: entries[0]!.name }) : t("app.files.deleteMany", { count: entries.length }),
+      message: t("app.files.deleteHint"),
+      confirmLabel: t("common.delete"),
       danger: true,
     });
     if (!ok) return;
@@ -263,14 +266,14 @@ export function FileStation() {
         failed++;
       }
     }
-    if (failed) push({ level: "warning", title: "Some items couldn't be deleted", body: `${failed} failed.` });
+    if (failed) push({ level: "warning", title: t("app.files.deleteSomeFailed"), body: t("app.files.failedCount", { count: failed }) });
     await load(path);
   }
 
   function copySelection(kind: ClipKind, entries: FileEntry[]) {
     if (entries.length === 0) return;
     setClip({ kind, dir: path, names: entries.map((e) => e.name) });
-    push({ level: "info", title: kind === "copy" ? "Copied" : "Cut", body: `${entries.length} item${entries.length > 1 ? "s" : ""} ready to paste.` });
+    push({ level: "info", title: kind === "copy" ? t("app.files.copied") : t("app.files.cutDone"), body: t("app.files.readyToPaste", { count: entries.length }) });
   }
 
   async function paste() {
@@ -286,15 +289,15 @@ export function FileStation() {
       }
     }
     if (clip.kind === "cut") setClip(null);
-    if (failed) push({ level: "warning", title: "Some items couldn't be pasted", body: `${failed} failed (name clash or permissions).` });
-    else push({ level: "success", title: clip.kind === "copy" ? "Copied here" : "Moved here", body: `${clip.names.length} item${clip.names.length > 1 ? "s" : ""}.` });
+    if (failed) push({ level: "warning", title: t("app.files.pasteSomeFailed"), body: t("app.files.pasteFailedCount", { count: failed }) });
+    else push({ level: "success", title: clip.kind === "copy" ? t("app.files.copiedHere") : t("app.files.movedHere"), body: t("app.files.itemsDone", { count: clip.names.length }) });
     await load(path);
   }
 
   function downloadEntries(entries: FileEntry[]) {
     const files = entries.filter((e) => e.type === "file");
     if (files.length === 0) {
-      push({ level: "info", title: "Nothing to download", body: "For folders, use 'Download as ZIP'." });
+      push({ level: "info", title: t("app.files.nothingToDownload"), body: t("app.files.useZipForFolders") });
       return;
     }
     for (const e of files) window.open(apiUrl(`/files/download?path=${encodeURIComponent(join(e.name))}`), "_blank");
@@ -309,12 +312,12 @@ export function FileStation() {
       const res = await fetch(apiUrl(`/files/upload?path=${encodeURIComponent(path)}`), { method: "POST", body: fd, credentials: "include" });
       if (!res.ok) {
         const body = await res.json().catch(() => null);
-        throw new Error(body?.message ?? "Upload failed.");
+        throw new Error(body?.message ?? t("app.files.uploadFailedBody"));
       }
-      push({ level: "success", title: "Upload complete", body: `${files.length} item${files.length > 1 ? "s" : ""} uploaded to ${path}.` });
+      push({ level: "success", title: t("app.files.uploadComplete"), body: t("app.files.uploadedTo", { count: files.length, path }) });
       await load(path);
     } catch (err) {
-      push({ level: "warning", title: "Upload failed", body: err instanceof Error ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.files.uploadFailed"), body: err instanceof Error ? err.message : t("app.files.failed") });
     } finally {
       setUploading(0);
     }
@@ -334,31 +337,31 @@ export function FileStation() {
 
   async function compressSelection(entries: FileEntry[]) {
     if (entries.length === 0) return;
-    const def = entries.length === 1 ? entries[0]!.name.replace(/\.[^.]+$/, "") : "archive";
+    const def = entries.length === 1 ? entries[0]!.name.replace(/\.[^.]+$/, "") : t("app.files.archiveName");
     const name = await promptDialog({
-      title: "Compress to ZIP",
-      message: `Create a .zip from ${entries.length} item${entries.length > 1 ? "s" : ""}.`,
-      confirmLabel: "Compress",
+      title: t("app.files.compressTitle"),
+      message: t("app.files.compressMessage", { count: entries.length }),
+      confirmLabel: t("app.files.compress"),
       defaultValue: def,
-      placeholder: "archive",
+      placeholder: t("app.files.archiveName"),
     });
     if (!name) return;
     try {
       await api.post("/files/compress", { dir: path, names: entries.map((e) => e.name), name });
-      push({ level: "success", title: "Compressed", body: `${name.replace(/\.zip$/i, "")}.zip created.` });
+      push({ level: "success", title: t("app.files.compressed"), body: t("app.files.zipCreated", { name: name.replace(/\.zip$/i, "") }) });
       await load(path);
     } catch (err) {
-      push({ level: "warning", title: "Couldn't compress", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.files.compressFailed"), body: err instanceof ApiRequestError ? err.message : t("app.files.failed") });
     }
   }
 
   async function extractEntry(e: FileEntry) {
     try {
       const res = await api.post<{ path: string }>("/files/extract", { path: join(e.name) });
-      push({ level: "success", title: "Extracted", body: `"${e.name}" unpacked to ${res.path.split("/").pop()}.` });
+      push({ level: "success", title: t("app.files.extracted"), body: t("app.files.extractedTo", { name: e.name, folder: res.path.split("/").pop() ?? "" }) });
       await load(path);
     } catch (err) {
-      push({ level: "warning", title: "Couldn't extract", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.files.extractFailed"), body: err instanceof ApiRequestError ? err.message : t("app.files.failed") });
     }
   }
 
@@ -396,8 +399,8 @@ export function FileStation() {
         failed++;
       }
     }
-    if (failed) push({ level: "warning", title: `Some items couldn't be ${op === "copy" ? "copied" : "moved"}`, body: `${failed} failed.` });
-    else push({ level: "success", title: op === "copy" ? "Copied" : "Moved", body: `${names.length} item${names.length > 1 ? "s" : ""} into "${folder.name}".` });
+    if (failed) push({ level: "warning", title: op === "copy" ? t("app.files.copySomeFailed") : t("app.files.moveSomeFailed"), body: t("app.files.failedCount", { count: failed }) });
+    else push({ level: "success", title: op === "copy" ? t("app.files.copied") : t("app.files.moved"), body: t("app.files.itemsInto", { count: names.length, folder: folder.name }) });
     await load(path);
   }
 
@@ -409,34 +412,34 @@ export function FileStation() {
       const e = menu.entry;
       const multi = sel.length > 1;
       const items: MenuItem[] = [];
-      if (e.type === "dir") items.push({ label: "Open", icon: <FolderOpen size={15} />, onClick: () => openEntry(e) });
-      else if (isPreviewable(e)) items.push({ label: "Preview", icon: <Eye size={15} />, onClick: () => openPreview(e) });
+      if (e.type === "dir") items.push({ label: t("app.files.open"), icon: <FolderOpen size={15} />, onClick: () => openEntry(e) });
+      else if (isPreviewable(e)) items.push({ label: t("app.files.preview"), icon: <Eye size={15} />, onClick: () => openPreview(e) });
       if (sel.some((x) => x.type === "file")) {
-        items.push({ label: multi ? "Download files" : "Download", icon: <Download size={15} />, onClick: () => downloadEntries(sel) });
+        items.push({ label: multi ? t("app.files.downloadFiles") : t("app.files.download"), icon: <Download size={15} />, onClick: () => downloadEntries(sel) });
       }
       if (!multi && e.type === "dir") {
-        items.push({ label: "Download as ZIP", icon: <Download size={15} />, onClick: () => downloadFolderZip(e) });
+        items.push({ label: t("app.files.downloadZip"), icon: <Download size={15} />, onClick: () => downloadFolderZip(e) });
       }
       if (!multi && e.type === "file" && /\.zip$/i.test(e.name) && writable) {
-        items.push({ label: "Extract here", icon: <PackageOpen size={15} />, onClick: () => void extractEntry(e) });
+        items.push({ label: t("app.files.extractHere"), icon: <PackageOpen size={15} />, onClick: () => void extractEntry(e) });
       }
-      if (writable) items.push({ label: multi ? `Compress ${sel.length} items` : "Compress to ZIP", icon: <Archive size={15} />, onClick: () => void compressSelection(sel) });
-      items.push({ label: "Copy", icon: <Copy size={15} />, onClick: () => copySelection("copy", sel), separator: true });
-      if (writable) items.push({ label: "Cut", icon: <Scissors size={15} />, onClick: () => copySelection("cut", sel) });
-      if (writable && !multi) items.push({ label: "Rename", icon: <Pencil size={15} />, onClick: () => startRename(e) });
-      if (!multi) items.push({ label: "Share link...", icon: <Link2 size={15} />, onClick: () => setShareEntry(e), separator: true });
-      items.push({ label: "Properties", icon: <Info size={15} />, onClick: () => setPropsFor(e), separator: !multi ? false : true });
-      if (writable) items.push({ label: multi ? `Delete ${sel.length} items` : "Delete", icon: <Trash2 size={15} />, danger: true, onClick: () => deleteEntries(sel), separator: true });
+      if (writable) items.push({ label: multi ? t("app.files.compressCount", { count: sel.length }) : t("app.files.compressTitle"), icon: <Archive size={15} />, onClick: () => void compressSelection(sel) });
+      items.push({ label: t("app.files.copy"), icon: <Copy size={15} />, onClick: () => copySelection("copy", sel), separator: true });
+      if (writable) items.push({ label: t("app.files.cut"), icon: <Scissors size={15} />, onClick: () => copySelection("cut", sel) });
+      if (writable && !multi) items.push({ label: t("app.files.rename"), icon: <Pencil size={15} />, onClick: () => startRename(e) });
+      if (!multi) items.push({ label: t("app.files.shareLink"), icon: <Link2 size={15} />, onClick: () => setShareEntry(e), separator: true });
+      items.push({ label: t("app.files.properties"), icon: <Info size={15} />, onClick: () => setPropsFor(e), separator: !multi ? false : true });
+      if (writable) items.push({ label: multi ? t("app.files.deleteCount", { count: sel.length }) : t("common.delete"), icon: <Trash2 size={15} />, danger: true, onClick: () => deleteEntries(sel), separator: true });
       return items;
     }
     // Background menu
     return [
-      { label: "Paste", icon: <ClipboardPaste size={15} />, disabled: !clip || !writable, onClick: () => void paste() },
-      { label: "New folder", icon: <FolderPlus size={15} />, disabled: !writable, onClick: () => setCreating(true), separator: true },
-      { label: "New text file", icon: <FilePlus size={15} />, disabled: !writable, onClick: () => void createTextFile() },
-      { label: "Upload files", icon: <Upload size={15} />, disabled: !writable, onClick: () => fileInput.current?.click() },
-      { label: "Select all", icon: <Check size={15} />, onClick: () => setSelected(new Set(displayed.map((e) => e.name))), separator: true },
-      { label: "Refresh", icon: <RefreshCw size={15} />, onClick: () => void load(path) },
+      { label: t("app.files.paste"), icon: <ClipboardPaste size={15} />, disabled: !clip || !writable, onClick: () => void paste() },
+      { label: t("app.files.newFolder"), icon: <FolderPlus size={15} />, disabled: !writable, onClick: () => setCreating(true), separator: true },
+      { label: t("app.files.newTextFile"), icon: <FilePlus size={15} />, disabled: !writable, onClick: () => void createTextFile() },
+      { label: t("app.files.uploadFiles"), icon: <Upload size={15} />, disabled: !writable, onClick: () => fileInput.current?.click() },
+      { label: t("app.files.selectAll"), icon: <Check size={15} />, onClick: () => setSelected(new Set(displayed.map((e) => e.name))), separator: true },
+      { label: t("desktop.refresh"), icon: <RefreshCw size={15} />, onClick: () => void load(path) },
     ];
   }
 
@@ -451,16 +454,16 @@ export function FileStation() {
     >
       {/* Toolbar */}
       <header className="flex items-center gap-1.5 border-b border-slate-200 px-3 py-2">
-        <button onClick={() => parent && load(parent)} disabled={!parent} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100 disabled:opacity-40" title="Back">
+        <button onClick={() => parent && load(parent)} disabled={!parent} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100 disabled:opacity-40" title={t("app.files.back")}>
           <ArrowLeft size={16} />
         </button>
-        <button onClick={() => parent && load(parent)} disabled={!parent} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100 disabled:opacity-40" title="Up one level">
+        <button onClick={() => parent && load(parent)} disabled={!parent} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100 disabled:opacity-40" title={t("app.files.upOneLevel")}>
           <ArrowUp size={16} />
         </button>
 
         {/* Breadcrumb */}
         <nav className="opennas-scroll flex min-w-0 flex-1 items-center gap-0.5 overflow-x-auto whitespace-nowrap px-1 text-sm">
-          <Crumb onClick={() => load("/")} label="Shared Folders" active={path === "/"} />
+          <Crumb onClick={() => load("/")} label={t("shares.title")} active={path === "/"} />
           {segments.map((seg, i) => {
             const p = "/" + segments.slice(0, i + 1).join("/");
             return (
@@ -478,38 +481,38 @@ export function FileStation() {
           <input
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search"
+            placeholder={t("desktop.search")}
             className="h-8 w-36 rounded-lg bg-slate-100 pl-8 pr-2 text-sm text-ink placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-brand-500"
           />
           {query && (
-            <button onClick={() => setQuery("")} className="absolute right-1.5 grid h-5 w-5 place-items-center rounded text-slate-400 hover:text-ink-soft" title="Clear">
+            <button onClick={() => setQuery("")} className="absolute right-1.5 grid h-5 w-5 place-items-center rounded text-slate-400 hover:text-ink-soft" title={t("app.files.clearSearch")}>
               <X size={13} />
             </button>
           )}
         </div>
 
-        <button onClick={() => setView((v) => (v === "list" ? "grid" : "list"))} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100" title={view === "list" ? "Grid view" : "List view"}>
+        <button onClick={() => setView((v) => (v === "list" ? "grid" : "list"))} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100" title={view === "list" ? t("app.files.gridView") : t("app.files.listView")}>
           {view === "list" ? <LayoutGrid size={16} /> : <ListIcon size={16} />}
         </button>
-        <button onClick={() => load(path)} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100" title="Refresh">
+        <button onClick={() => load(path)} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100" title={t("desktop.refresh")}>
           <RefreshCw size={15} className={loading ? "animate-spin" : ""} />
         </button>
-        <button onClick={() => setShowLinks(true)} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100" title="Shared links">
+        <button onClick={() => setShowLinks(true)} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100" title={t("app.files.sharedLinks")}>
           <Link2 size={16} />
         </button>
-        <button onClick={() => setShowTrash(true)} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100" title="Recycle Bin">
+        <button onClick={() => setShowTrash(true)} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft transition hover:bg-slate-100" title={t("app.files.recycleBin")}>
           <Trash2 size={16} />
         </button>
         {clip && (
-          <button onClick={() => void paste()} disabled={!writable} className="flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-sm text-ink-soft transition hover:bg-slate-100 disabled:opacity-40" title={`Paste ${clip.names.length} item(s)`}>
-            <ClipboardPaste size={16} /> <span className="hidden sm:inline">Paste</span>
+          <button onClick={() => void paste()} disabled={!writable} className="flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-sm text-ink-soft transition hover:bg-slate-100 disabled:opacity-40" title={t("app.files.pasteCount", { count: clip.names.length })}>
+            <ClipboardPaste size={16} /> <span className="hidden sm:inline">{t("app.files.paste")}</span>
           </button>
         )}
-        <button onClick={() => setCreating((c) => !c)} disabled={!writable} className="flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-sm text-ink-soft transition hover:bg-slate-100 disabled:opacity-40" title="New folder">
-          <FolderPlus size={16} /> <span className="hidden sm:inline">New</span>
+        <button onClick={() => setCreating((c) => !c)} disabled={!writable} className="flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-sm text-ink-soft transition hover:bg-slate-100 disabled:opacity-40" title={t("app.files.newFolder")}>
+          <FolderPlus size={16} /> <span className="hidden sm:inline">{t("app.files.new")}</span>
         </button>
         <Button className="h-8 px-3 py-0 text-xs" onClick={() => fileInput.current?.click()} loading={uploading > 0} disabled={!writable}>
-          <Upload size={15} /> Upload
+          <Upload size={15} /> {t("app.files.upload")}
         </Button>
         <input ref={fileInput} type="file" multiple hidden onChange={(e) => { if (e.target.files) void uploadFiles(Array.from(e.target.files)); e.target.value = ""; }} />
       </header>
@@ -522,24 +525,24 @@ export function FileStation() {
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") void createFolder(); if (e.key === "Escape") setCreating(false); }}
-            placeholder="Folder name"
+            placeholder={t("app.files.folderName")}
             className="h-8 max-w-xs py-0 text-sm"
           />
-          <Button className="h-8 px-3 py-0 text-xs" onClick={createFolder}>Create</Button>
-          <Button variant="ghost" className="h-8 px-2 py-0 text-xs" onClick={() => setCreating(false)}>Cancel</Button>
+          <Button className="h-8 px-3 py-0 text-xs" onClick={createFolder}>{t("common.create")}</Button>
+          <Button variant="ghost" className="h-8 px-2 py-0 text-xs" onClick={() => setCreating(false)}>{t("common.cancel")}</Button>
         </div>
       )}
 
       {/* Selection action bar */}
       {selected.size > 0 && (
         <div className="flex items-center gap-2 border-b border-brand-100 bg-brand-50/60 px-4 py-1.5 text-xs">
-          <span className="font-medium text-brand-700">{selected.size} selected</span>
+          <span className="font-medium text-brand-700">{t("app.files.selected", { count: selected.size })}</span>
           <span className="flex-1" />
-          <BarBtn onClick={() => downloadEntries(selectedEntries)}><Download size={13} /> Download</BarBtn>
-          <BarBtn onClick={() => copySelection("copy", selectedEntries)}><Copy size={13} /> Copy</BarBtn>
-          {writable && <BarBtn onClick={() => copySelection("cut", selectedEntries)}><Scissors size={13} /> Cut</BarBtn>}
-          {writable && <BarBtn danger onClick={() => deleteEntries(selectedEntries)}><Trash2 size={13} /> Delete</BarBtn>}
-          <BarBtn onClick={() => setSelected(new Set())}><X size={13} /> Clear</BarBtn>
+          <BarBtn onClick={() => downloadEntries(selectedEntries)}><Download size={13} /> {t("app.files.download")}</BarBtn>
+          <BarBtn onClick={() => copySelection("copy", selectedEntries)}><Copy size={13} /> {t("app.files.copy")}</BarBtn>
+          {writable && <BarBtn onClick={() => copySelection("cut", selectedEntries)}><Scissors size={13} /> {t("app.files.cut")}</BarBtn>}
+          {writable && <BarBtn danger onClick={() => deleteEntries(selectedEntries)}><Trash2 size={13} /> {t("common.delete")}</BarBtn>}
+          <BarBtn onClick={() => setSelected(new Set())}><X size={13} /> {t("app.files.clearSelection")}</BarBtn>
         </div>
       )}
 
@@ -551,10 +554,10 @@ export function FileStation() {
           <div className="grid h-full place-items-center px-6 text-center">
             <div className="text-ink-faint">
               <FolderPlus size={32} className="mx-auto mb-2 text-slate-300" />
-              <p className="text-sm">{query ? "No matches." : path === "/" ? "No shared folders yet." : "This folder is empty."}</p>
+              <p className="text-sm">{query ? t("app.files.noMatches") : path === "/" ? t("app.files.noShares") : t("app.files.empty")}</p>
               {!query && (
                 <p className="text-xs">
-                  {path === "/" ? "Create one in Control Panel → Shared Folders." : "Drag files here or use the Upload button."}
+                  {path === "/" ? t("app.files.noSharesHint") : t("app.files.emptyHint")}
                 </p>
               )}
             </div>
@@ -563,9 +566,9 @@ export function FileStation() {
           <table className="w-full border-collapse text-sm">
             <thead className="sticky top-0 z-10 bg-white text-left text-xs text-ink-faint shadow-[0_1px_0_rgb(0_0_0/0.06)]">
               <tr>
-                <SortHead label="Name" col="name" sortKey={sortKey} sortAsc={sortAsc} onSort={setSort} className="px-4 py-2" />
-                <SortHead label="Size" col="size" sortKey={sortKey} sortAsc={sortAsc} onSort={setSort} className="w-28 px-3 py-2 text-right" align="right" />
-                <SortHead label="Modified" col="modified" sortKey={sortKey} sortAsc={sortAsc} onSort={setSort} className="hidden w-40 px-3 py-2 sm:table-cell" />
+                <SortHead label={t("common.name")} col="name" sortKey={sortKey} sortAsc={sortAsc} onSort={setSort} className="px-4 py-2" />
+                <SortHead label={t("app.files.size")} col="size" sortKey={sortKey} sortAsc={sortAsc} onSort={setSort} className="w-28 px-3 py-2 text-right" align="right" />
+                <SortHead label={t("app.files.modified")} col="modified" sortKey={sortKey} sortAsc={sortAsc} onSort={setSort} className="hidden w-40 px-3 py-2 sm:table-cell" />
                 <th className="w-24 px-3 py-2"></th>
               </tr>
             </thead>
@@ -611,15 +614,15 @@ export function FileStation() {
                     <td className="px-3 py-2">
                       <div className="flex items-center justify-end gap-0.5 opacity-0 transition group-hover:opacity-100">
                         {e.type === "file" && (
-                          <RowBtn label="Download" onClick={(ev) => { ev.stopPropagation(); window.open(apiUrl(`/files/download?path=${encodeURIComponent(join(e.name))}`), "_blank"); }}>
+                          <RowBtn label={t("app.files.download")} onClick={(ev) => { ev.stopPropagation(); window.open(apiUrl(`/files/download?path=${encodeURIComponent(join(e.name))}`), "_blank"); }}>
                             <Download size={15} />
                           </RowBtn>
                         )}
-                        <RowBtn label="More" onClick={(ev) => { ev.stopPropagation(); if (!selected.has(e.name)) setSelected(new Set([e.name])); setMenu({ x: ev.clientX, y: ev.clientY, entry: e }); }}>
+                        <RowBtn label={t("app.files.more")} onClick={(ev) => { ev.stopPropagation(); if (!selected.has(e.name)) setSelected(new Set([e.name])); setMenu({ x: ev.clientX, y: ev.clientY, entry: e }); }}>
                           <Info size={15} />
                         </RowBtn>
                         {writable && (
-                          <RowBtn label="Delete" danger onClick={(ev) => { ev.stopPropagation(); void deleteEntries([e]); }}>
+                          <RowBtn label={t("common.delete")} danger onClick={(ev) => { ev.stopPropagation(); void deleteEntries([e]); }}>
                             <Trash2 size={15} />
                           </RowBtn>
                         )}
@@ -659,11 +662,11 @@ export function FileStation() {
 
       <footer className="flex items-center justify-between border-t border-slate-200 px-4 py-1.5 text-xs text-ink-faint">
         <span>
-          {listing ? `${displayed.length} item${displayed.length === 1 ? "" : "s"}` : "..."}
-          {query && listing ? ` (filtered from ${listing.entries.length})` : ""}
-          {!writable && listing ? " - read-only" : ""}
+          {listing ? t("app.files.items", { count: displayed.length }) : "..."}
+          {query && listing ? ` ${t("app.files.filteredFrom", { total: listing.entries.length })}` : ""}
+          {!writable && listing ? ` - ${t("app.files.readOnly")}` : ""}
         </span>
-        {uploading > 0 && <span className="text-brand-600">Uploading {uploading}...</span>}
+        {uploading > 0 && <span className="text-brand-600">{t("app.files.uploading", { count: uploading })}</span>}
       </footer>
 
       {/* Drag-drop overlay */}
@@ -671,8 +674,8 @@ export function FileStation() {
         <div className="pointer-events-none absolute inset-0 z-20 m-2 grid place-items-center rounded-xl border-2 border-dashed border-brand-400 bg-brand-50/80 backdrop-blur-sm">
           <div className="text-center text-brand-700">
             <Upload size={32} className="mx-auto mb-2" />
-            <p className="font-semibold">Drop to upload</p>
-            <p className="text-sm">to {path}</p>
+            <p className="font-semibold">{t("app.files.dropToUpload")}</p>
+            <p className="text-sm">{t("app.files.dropTarget", { path })}</p>
           </div>
         </div>
       )}
@@ -801,6 +804,8 @@ function FolderIcon({ size = 16 }: { size?: number }) {
 }
 
 function PropertiesPanel({ dir, entry, onClose }: { dir: string; entry: FileEntry; onClose: () => void }) {
+  const t = useT();
+  const locale = useLocale();
   const [info, setInfo] = useState<FileInfoResponse["info"] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const path = dir === "/" ? `/${entry.name}` : `${dir}/${entry.name}`;
@@ -809,8 +814,9 @@ function PropertiesPanel({ dir, entry, onClose }: { dir: string; entry: FileEntr
     let cancelled = false;
     api.get<FileInfoResponse>(`/files/info?path=${encodeURIComponent(path)}`)
       .then((r) => { if (!cancelled) setInfo(r.info); })
-      .catch((e) => { if (!cancelled) setError(e instanceof ApiRequestError ? e.message : "Couldn't read properties."); });
+      .catch((e) => { if (!cancelled) setError(e instanceof ApiRequestError ? e.message : t("app.files.propsFailed")); });
     return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [path]);
 
   return (
@@ -820,21 +826,21 @@ function PropertiesPanel({ dir, entry, onClose }: { dir: string; entry: FileEntr
           <EntryIcon entry={entry} big />
           <div className="min-w-0 flex-1">
             <p className="truncate font-semibold text-ink" title={entry.name}>{entry.name}</p>
-            <p className="text-xs text-ink-faint">{entry.type === "dir" ? "Folder" : entry.mime ?? "File"}</p>
+            <p className="text-xs text-ink-faint">{entry.type === "dir" ? t("app.files.folder") : entry.mime ?? t("app.files.file")}</p>
           </div>
-          <button onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft hover:bg-slate-100" title="Close"><X size={18} /></button>
+          <button onClick={onClose} className="grid h-8 w-8 place-items-center rounded-lg text-ink-soft hover:bg-slate-100" title={t("desktop.close")}><X size={18} /></button>
         </div>
         {error ? (
           <p className="text-sm text-rose-600">{error}</p>
         ) : !info ? (
-          <p className="text-sm text-ink-faint">Reading...</p>
+          <p className="text-sm text-ink-faint">{t("app.files.reading")}</p>
         ) : (
           <dl className="space-y-2 text-sm">
-            <Row label="Location" value={dir} mono />
-            <Row label="Size" value={formatBytes(info.sizeBytes)} />
-            {info.type === "dir" && <Row label="Contains" value={`${info.itemCount} item${info.itemCount === 1 ? "" : "s"}`} />}
-            <Row label="Modified" value={new Date(info.modifiedAt).toLocaleString()} />
-            <Row label="Created" value={new Date(info.createdAt).toLocaleString()} />
+            <Row label={t("app.files.location")} value={dir} mono />
+            <Row label={t("app.files.size")} value={formatBytes(info.sizeBytes)} />
+            {info.type === "dir" && <Row label={t("app.files.contains")} value={t("app.files.items", { count: info.itemCount })} />}
+            <Row label={t("app.files.modified")} value={new Date(info.modifiedAt).toLocaleString(locale)} />
+            <Row label={t("app.files.created")} value={new Date(info.createdAt).toLocaleString(locale)} />
           </dl>
         )}
       </div>

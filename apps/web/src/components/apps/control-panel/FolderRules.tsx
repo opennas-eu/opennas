@@ -4,6 +4,8 @@ import type { AccessLevel, AdminUser, FolderAcl, FolderAclsResponse, Group, Shar
 import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { Button, Field, Input, Select } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
+import type { MessageKey } from "../../../i18n/index.ts";
 
 /**
  * Folder-level rules for one share.
@@ -13,10 +15,10 @@ import { Button, Field, Input, Select } from "../../ui/controls.tsx";
  * stated on screen rather than left to documentation nobody reads.
  */
 
-const LEVEL_LABEL: Record<AccessLevel, string> = {
-  none: "No access",
-  ro: "Read only",
-  rw: "Read & write",
+const LEVEL_LABEL: Record<AccessLevel, MessageKey> = {
+  none: "cp.shares.noAccess",
+  ro: "common.readOnly",
+  rw: "common.readWrite",
 };
 
 const LEVEL_STYLE: Record<AccessLevel, string> = {
@@ -34,6 +36,7 @@ export function FolderRules({ share, users, groups }: { share: Share; users: Adm
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const push = useNotifications((s) => s.push);
+  const t = useT();
 
   async function load() {
     try {
@@ -47,7 +50,7 @@ export function FolderRules({ share, users, groups }: { share: Share; users: Adm
   async function add() {
     // The picker encodes both halves so one <select> can offer users and groups.
     const [subjectType, subjectId] = subject.split(":") as ["user" | "group", string];
-    if (!subjectId) { setError("Choose who the rule applies to."); return; }
+    if (!subjectId) { setError(t("cp.folderRules.chooseSubject")); return; }
     setBusy(true);
     setError(null);
     try {
@@ -55,7 +58,7 @@ export function FolderRules({ share, users, groups }: { share: Share; users: Adm
       setPath(""); setSubject(""); setLevel("none"); setAdding(false);
       await load();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't add that rule.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.folderRules.addFailed"));
     } finally {
       setBusy(false);
     }
@@ -66,7 +69,7 @@ export function FolderRules({ share, users, groups }: { share: Share; users: Adm
       await api.del(`/admin/shares/${share.id}/acls/${acl.id}`);
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't remove the rule", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.folderRules.removeFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
@@ -74,60 +77,59 @@ export function FolderRules({ share, users, groups }: { share: Share; users: Adm
     <div>
       <div className="mb-2 flex items-center justify-between">
         <h4 className="flex items-center gap-2 text-sm font-semibold text-ink-soft">
-          <FolderLock size={15} /> Folder rules
+          <FolderLock size={15} /> {t("cp.folderRules.title")}
         </h4>
         {!adding && (
           <Button variant="secondary" className="h-8 px-3 py-0 text-xs" onClick={() => setAdding(true)}>
-            <Plus size={14} /> Add rule
+            <Plus size={14} /> {t("cp.folderRules.addRule")}
           </Button>
         )}
       </div>
 
       <p className="mb-3 text-xs text-ink-faint">
-        Change access to one folder inside this share. The closest rule wins, and a person beats a group. A rule can
-        never grant access to a share someone can't already reach.
+        {t("cp.folderRules.intro")}
       </p>
 
       {adding && (
         <div className="mb-3 space-y-3 rounded-lg bg-slate-50 p-3 ring-1 ring-slate-200">
           <div className="grid gap-3 sm:grid-cols-3">
-            <Field label="Folder" hint={`Inside ${share.name}, e.g. "payroll/2026"`}>
-              <Input value={path} onChange={(e) => setPath(e.target.value)} placeholder="payroll" autoFocus />
+            <Field label={t("cp.folderRules.folder")} hint={t("cp.folderRules.folderHint", { name: share.name })}>
+              <Input value={path} onChange={(e) => setPath(e.target.value)} placeholder={t("cp.folderRules.folderExample")} autoFocus />
             </Field>
-            <Field label="Applies to">
+            <Field label={t("cp.folderRules.appliesTo")}>
               <Select value={subject} onChange={(e) => setSubject(e.target.value)} className="w-full">
-                <option value="">Choose...</option>
+                <option value="">{t("cp.folderRules.choose")}</option>
                 {groups.length > 0 && (
-                  <optgroup label="Groups">
+                  <optgroup label={t("cp.groups")}>
                     {groups.map((g) => <option key={g.id} value={`group:${g.id}`}>{g.name}</option>)}
                   </optgroup>
                 )}
-                <optgroup label="People">
+                <optgroup label={t("cp.folderRules.people")}>
                   {users.map((u) => <option key={u.id} value={`user:${u.id}`}>{u.displayName} (@{u.username})</option>)}
                 </optgroup>
               </Select>
             </Field>
-            <Field label="Access">
+            <Field label={t("cp.folderRules.access")}>
               <Select value={level} onChange={(e) => setLevel(e.target.value as AccessLevel)} className="w-full">
-                <option value="none">No access</option>
-                <option value="ro">Read only</option>
-                <option value="rw">Read &amp; write</option>
+                <option value="none">{t("cp.shares.noAccess")}</option>
+                <option value="ro">{t("common.readOnly")}</option>
+                <option value="rw">{t("common.readWrite")}</option>
               </Select>
             </Field>
           </div>
           {error && <p className="text-sm text-rose-600">{error}</p>}
           <div className="flex gap-2">
-            <Button loading={busy} onClick={add} disabled={!path.trim() || !subject}>Add rule</Button>
-            <Button variant="ghost" onClick={() => { setAdding(false); setError(null); }}>Cancel</Button>
+            <Button loading={busy} onClick={add} disabled={!path.trim() || !subject}>{t("cp.folderRules.addRule")}</Button>
+            <Button variant="ghost" onClick={() => { setAdding(false); setError(null); }}>{t("common.cancel")}</Button>
           </div>
         </div>
       )}
 
       {acls === null ? (
-        <p className="text-sm text-ink-faint">Loading...</p>
+        <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>
       ) : acls.length === 0 ? (
         <div className="rounded-lg border border-dashed border-slate-300 p-4 text-center text-xs text-ink-faint">
-          No folder rules. Everyone with access to this share sees all of it.
+          {t("cp.folderRules.empty")}
         </div>
       ) : (
         <div className="space-y-1.5">
@@ -135,17 +137,17 @@ export function FolderRules({ share, users, groups }: { share: Share; users: Adm
             <div key={acl.id} className="flex items-center gap-2 rounded-lg bg-slate-50 px-3 py-1.5">
               <code className="truncate font-mono text-xs text-ink-soft">/{acl.path}</code>
               <span className="text-xs text-ink-faint">
-                {acl.subjectType === "group" ? "group" : "person"}
+                {acl.subjectType === "group" ? t("cp.folderRules.group") : t("cp.folderRules.person")}
               </span>
               <span className="truncate text-sm text-ink-soft">
                 {acl.subjectType === "group" ? acl.subjectName : `${acl.subjectLabel} (@${acl.subjectName})`}
               </span>
               <span className="flex-1" />
               <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] ring-1 ${LEVEL_STYLE[acl.level]}`}>
-                {LEVEL_LABEL[acl.level]}
+                {t(LEVEL_LABEL[acl.level])}
               </span>
               <button
-                aria-label="Remove rule"
+                aria-label={t("cp.folderRules.removeRule")}
                 onClick={() => void remove(acl)}
                 className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-ink-faint transition-colors hover:bg-rose-500 hover:text-white"
               >
@@ -160,10 +162,7 @@ export function FolderRules({ share, users, groups }: { share: Share; users: Adm
         <div className="mt-2 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 ring-1 ring-amber-200">
           <Info size={14} className="mt-0.5 shrink-0" />
           <div>
-            <strong className="font-medium">Folder rules apply to the web interface.</strong> Over SMB and NFS this share
-            is governed by its user and group permissions above - every SMB connection is mapped to one service account,
-            so the file server has no way to tell your users apart below the share. Keep anything that must be private
-            from SMB clients in a separate share.
+            <strong className="font-medium">{t("cp.folderRules.webOnly")}</strong> {t("cp.folderRules.webOnlyDetail")}
           </div>
         </div>
       )}

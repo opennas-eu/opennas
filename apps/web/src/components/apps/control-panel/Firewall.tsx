@@ -7,6 +7,8 @@ import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { BlockedAddresses } from "./BlockedAddresses.tsx";
 import { Button, Input, Toggle } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
+import { fillElements } from "./fillElements.tsx";
 
 /**
  * Host firewall.
@@ -18,6 +20,7 @@ import { Button, Input, Toggle } from "../../ui/controls.tsx";
  * rules back by itself.
  */
 export function Firewall() {
+  const t = useT();
   const push = useNotifications((s) => s.push);
   const [data, setData] = useState<FirewallResponse | null>(null);
   const [draft, setDraft] = useState<FirewallConfig | null>(null);
@@ -53,7 +56,7 @@ export function Firewall() {
     return () => { if (tick.current) window.clearInterval(tick.current); };
   }, [pending?.token]);
 
-  if (!data || !draft) return <p className="text-sm text-ink-faint">Loading...</p>;
+  if (!data || !draft) return <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>;
 
   const dirty = JSON.stringify(draft) !== JSON.stringify(data.config);
 
@@ -82,10 +85,10 @@ export function Firewall() {
       if (res.pending) {
         setPending({ token: res.pending.token, left: res.pending.revertsInSeconds });
       } else {
-        push({ level: "success", title: draft.enabled ? "Firewall updated" : "Firewall turned off" });
+        push({ level: "success", title: draft.enabled ? t("cp.firewall.updated") : t("cp.firewall.turnedOff") });
       }
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Couldn't apply those rules.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.firewall.applyFailed"));
     } finally {
       setBusy(false);
     }
@@ -96,7 +99,7 @@ export function Firewall() {
     try {
       await api.post("/admin/firewall/confirm", { token: pending.token });
       setPending(null);
-      push({ level: "success", title: "Firewall rules kept" });
+      push({ level: "success", title: t("cp.firewall.kept") });
       await load();
     } catch {
       // The timer almost certainly won; reload rather than guess.
@@ -108,7 +111,7 @@ export function Firewall() {
   async function undo() {
     try {
       await api.post("/admin/firewall/revert", {});
-      push({ level: "success", title: "Previous rules restored" });
+      push({ level: "success", title: t("cp.firewall.restored") });
     } catch { /* the timer may already have done it */ }
     setPending(null);
     await load();
@@ -117,9 +120,9 @@ export function Firewall() {
   return (
     <div className="max-w-3xl">
       <div className="mb-5">
-        <h2 className="flex items-center gap-2 text-lg font-semibold text-ink"><ShieldCheck size={20} /> Firewall</h2>
+        <h2 className="flex items-center gap-2 text-lg font-semibold text-ink"><ShieldCheck size={20} /> {t("cp.firewall")}</h2>
         <p className="text-sm text-ink-faint">
-          Choose what this NAS accepts from the network. Anything not listed here is refused.
+          {t("cp.firewall.intro")}
         </p>
       </div>
 
@@ -134,16 +137,16 @@ export function Firewall() {
       {pending && (
         <div className="mb-4 rounded-xl bg-amber-50 p-4 ring-1 ring-amber-200">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-amber-900">
-            <AlertTriangle size={16} /> Still there? Confirm these rules
+            <AlertTriangle size={16} /> {t("cp.firewall.confirmTitle")}
           </h3>
           <p className="mt-1 text-xs text-amber-800">
-            The new rules are live. If they've cut off anything you need, do nothing - the previous rules come back
-            automatically in <strong>{pending.left}s</strong>. This message only reaches you because your connection
-            still works.
+            {fillElements(t("cp.firewall.pendingBody"), {
+              time: <strong>{t("cp.firewall.seconds", { seconds: pending.left })}</strong>,
+            })}
           </p>
           <div className="mt-3 flex gap-2">
-            <Button className="h-8 px-3 py-0 text-xs" onClick={confirm}><Check size={14} /> Keep these rules</Button>
-            <Button variant="secondary" className="h-8 px-3 py-0 text-xs" onClick={undo}><X size={14} /> Undo now</Button>
+            <Button className="h-8 px-3 py-0 text-xs" onClick={confirm}><Check size={14} /> {t("cp.firewall.keep")}</Button>
+            <Button variant="secondary" className="h-8 px-3 py-0 text-xs" onClick={undo}><X size={14} /> {t("cp.firewall.undo")}</Button>
           </div>
         </div>
       )}
@@ -151,21 +154,21 @@ export function Firewall() {
       <section className="rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
         <label className="flex items-center justify-between">
           <span>
-            <span className="block text-sm font-medium text-ink-soft">Turn the firewall on</span>
+            <span className="block text-sm font-medium text-ink-soft">{t("cp.firewall.turnOn")}</span>
             <span className="block text-xs text-ink-faint">
-              Blocks everything inbound except what you allow below. The web interface always stays reachable.
+              {t("cp.firewall.turnOnHint")}
             </span>
           </span>
           <Toggle
             checked={draft.enabled}
             onChange={(v) => setDraft({ ...draft, enabled: v })}
-            label="Turn the firewall on"
+            label={t("cp.firewall.turnOn")}
           />
         </label>
       </section>
 
       <section className="mt-4 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
-        <h3 className="mb-3 text-sm font-semibold text-ink-soft">What's allowed in</h3>
+        <h3 className="mb-3 text-sm font-semibold text-ink-soft">{t("cp.firewall.allowedIn")}</h3>
         <div className="space-y-2">
           {data.services.map((s: FirewallService) => (
             <div key={s.id} className="flex items-center justify-between gap-3 rounded-lg bg-white px-3.5 py-2.5 ring-1 ring-slate-200">
@@ -179,7 +182,7 @@ export function Firewall() {
                 <div className="text-xs text-ink-faint">{s.description}</div>
               </div>
               {s.alwaysOn ? (
-                <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-ink-faint">always on</span>
+                <span className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-ink-faint">{t("cp.firewall.alwaysOn")}</span>
               ) : (
                 <Toggle
                   checked={draft.allowed.includes(s.id)}
@@ -193,10 +196,13 @@ export function Firewall() {
       </section>
 
       <section className="mt-4 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
-        <h3 className="mb-1 text-sm font-semibold text-ink-soft">Trusted networks</h3>
+        <h3 className="mb-1 text-sm font-semibold text-ink-soft">{t("cp.firewall.trusted")}</h3>
         <p className="mb-3 text-xs text-ink-faint">
-          Addresses or ranges - <code className="font-mono">192.168.1.0/24</code>, <code className="font-mono">10.0.0.5</code>,
-          <code className="font-mono"> fd00::/8</code>. Normally these reach everything regardless of the toggles above.
+          {fillElements(t("cp.firewall.trustedHint"), {
+            a: <code className="font-mono">192.168.1.0/24</code>,
+            b: <code className="font-mono">10.0.0.5</code>,
+            c: <code className="font-mono">fd00::/8</code>,
+          })}
         </p>
 
         <div className="mb-3 flex gap-2">
@@ -207,19 +213,19 @@ export function Firewall() {
             onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); addNetwork(); } }}
           />
           <Button variant="secondary" className="shrink-0" onClick={addNetwork} disabled={!network.trim()}>
-            <Plus size={15} /> Add
+            <Plus size={15} /> {t("common.add")}
           </Button>
         </div>
 
         {draft.trustedNetworks.length === 0 ? (
-          <p className="text-xs text-ink-faint">None yet.</p>
+          <p className="text-xs text-ink-faint">{t("cp.firewall.noneYet")}</p>
         ) : (
           <div className="space-y-1.5">
             {draft.trustedNetworks.map((n) => (
               <div key={n} className="flex items-center gap-2 rounded-lg bg-white px-3 py-1.5 ring-1 ring-slate-200">
                 <code className="flex-1 font-mono text-xs text-ink-soft">{n}</code>
                 <button
-                  aria-label={`Remove ${n}`}
+                  aria-label={t("cp.firewall.removeItem", { item: n })}
                   onClick={() => setDraft({ ...draft, trustedNetworks: draft.trustedNetworks.filter((x) => x !== n) })}
                   className="grid h-7 w-7 place-items-center rounded-lg text-ink-faint transition-colors hover:bg-rose-500 hover:text-white"
                 >
@@ -239,10 +245,9 @@ export function Firewall() {
             className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300 text-brand-600 disabled:opacity-40"
           />
           <span>
-            <span className="block text-sm font-medium text-ink-soft">Accept connections only from these networks</span>
+            <span className="block text-sm font-medium text-ink-soft">{t("cp.firewall.restrict")}</span>
             <span className="block text-xs text-ink-faint">
-              Everything else is refused outright, including the web interface. Make sure you're on one of these
-              networks before applying - you'll be asked to confirm afterwards.
+              {t("cp.firewall.restrictHint")}
             </span>
           </span>
         </label>
@@ -252,12 +257,12 @@ export function Firewall() {
 
       <div className="mt-4 flex items-center gap-2">
         <Button loading={busy} onClick={apply} disabled={!dirty || pending !== null}>
-          {draft.enabled ? "Apply rules" : "Save"}
+          {draft.enabled ? t("cp.firewall.applyRules") : t("common.save")}
         </Button>
-        {dirty && <span className="text-xs text-ink-faint">Unsaved changes</span>}
+        {dirty && <span className="text-xs text-ink-faint">{t("cp.firewall.unsaved")}</span>}
         <span className="flex-1" />
         <button onClick={() => setShowRules((v) => !v)} className="text-xs text-ink-faint transition hover:text-ink-soft">
-          {showRules ? "Hide" : "Show"} generated rules
+          {showRules ? t("cp.firewall.hideRules") : t("cp.firewall.showRules")}
         </button>
       </div>
 

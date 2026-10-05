@@ -6,6 +6,7 @@ import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { confirmDialog } from "../../../store/dialogs.ts";
 import { Button, Field, Input } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
 
 /**
  * Groups: a named set of users that share permissions can be granted to.
@@ -16,6 +17,7 @@ import { Button, Field, Input } from "../../ui/controls.tsx";
  * Samba be told `valid users = @editors` instead of a list that goes stale.
  */
 export function Groups() {
+  const t = useT();
   const [groups, setGroups] = useState<Group[] | null>(null);
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -34,18 +36,17 @@ export function Groups() {
 
   async function remove(group: Group) {
     if (!(await confirmDialog({
-      title: `Delete the "${group.name}" group?`,
-      message:
-        "Members lose the access this group gave them, and its folder rules go. The accounts stay.",
-      confirmLabel: "Delete group",
+      title: t("cp.groups.deleteTitle", { name: group.name }),
+      message: t("cp.groups.deleteMessage"),
+      confirmLabel: t("cp.groups.deleteGroup"),
       danger: true,
     }))) return;
     try {
       await api.del(`/admin/groups/${group.id}`);
-      push({ level: "success", title: "Group deleted", body: group.name });
+      push({ level: "success", title: t("cp.groups.deleted"), body: group.name });
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't delete the group", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.groups.deleteFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
@@ -53,23 +54,23 @@ export function Groups() {
     <div>
       <div className="mb-5 flex items-start justify-between">
         <div>
-          <h2 className="text-lg font-semibold text-ink">Groups</h2>
+          <h2 className="text-lg font-semibold text-ink">{t("cp.groups")}</h2>
           <p className="text-sm text-ink-faint">
-            Grant access to a group instead of one person at a time - adding someone to it gives them everything it can reach.
+            {t("cp.groups.subtitle")}
           </p>
         </div>
         <Button className="h-9" onClick={() => setShowCreate((s) => !s)}>
-          <Plus size={16} /> New group
+          <Plus size={16} /> {t("cp.groups.new")}
         </Button>
       </div>
 
       {showCreate && <CreateGroupForm onDone={async () => { setShowCreate(false); await load(); }} />}
 
       <div className="space-y-2">
-        {groups === null && <p className="text-sm text-ink-faint">Loading...</p>}
+        {groups === null && <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>}
         {groups?.length === 0 && !showCreate && (
           <div className="rounded-xl border border-dashed border-slate-300 p-6 text-center text-sm text-ink-faint">
-            No groups yet. Create one - "family", "editors", "guests" - then grant it access in Shared Folders.
+            {t("cp.groups.empty")}
           </div>
         )}
         {groups?.map((g) => (
@@ -84,7 +85,7 @@ export function Groups() {
               <div className="min-w-0 flex-1">
                 <div className="truncate font-medium text-ink-soft">{g.name}</div>
                 <div className="text-xs text-ink-faint">
-                  {g.description || "No description"} - {g.memberCount} member{g.memberCount === 1 ? "" : "s"}
+                  {g.description || t("cp.groups.noDescription")} - {t("cp.groups.memberCount", { count: g.memberCount })}
                 </div>
               </div>
               <ChevronDown size={18} className={clsx("text-ink-faint transition-transform", expanded === g.id && "rotate-180")} />
@@ -100,6 +101,7 @@ export function Groups() {
 function GroupEditor({
   group, users, onSaved, onDelete,
 }: { group: Group; users: AdminUser[]; onSaved: () => Promise<void>; onDelete: () => void }) {
+  const t = useT();
   const [description, setDescription] = useState(group.description);
   const [members, setMembers] = useState<Set<string> | null>(null);
   const [busy, setBusy] = useState(false);
@@ -126,10 +128,10 @@ function GroupEditor({
     setBusy(true);
     try {
       await api.patch(`/admin/groups/${group.id}`, { description, members: [...members] });
-      push({ level: "success", title: "Group saved", body: group.name });
+      push({ level: "success", title: t("cp.groups.saved"), body: group.name });
       await onSaved();
     } catch (err) {
-      push({ level: "warning", title: "Save failed", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.groups.saveFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     } finally {
       setBusy(false);
     }
@@ -137,14 +139,14 @@ function GroupEditor({
 
   return (
     <div className="space-y-4 border-t border-slate-200 bg-white p-4">
-      <Field label="Description">
-        <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="What is this group for?" />
+      <Field label={t("common.description")}>
+        <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t("cp.groups.descriptionPlaceholder")} />
       </Field>
 
       <div>
-        <h4 className="mb-2 text-sm font-semibold text-ink-soft">Members</h4>
+        <h4 className="mb-2 text-sm font-semibold text-ink-soft">{t("cp.groups.members")}</h4>
         {members === null ? (
-          <p className="text-sm text-ink-faint">Loading...</p>
+          <p className="text-sm text-ink-faint">{t("desktop.loading")}</p>
         ) : (
           <div className="space-y-1.5">
             {users.map((u) => (
@@ -161,7 +163,7 @@ function GroupEditor({
                 <span className="flex-1 truncate text-sm text-ink-soft">
                   {u.displayName} <span className="text-ink-faint">@{u.username}</span>
                 </span>
-                {u.role === "admin" && <span className="rounded-full bg-brand-100 px-1.5 text-[11px] text-brand-700">admin</span>}
+                {u.role === "admin" && <span className="rounded-full bg-brand-100 px-1.5 text-[11px] text-brand-700">{t("cp.groups.adminBadge")}</span>}
               </label>
             ))}
           </div>
@@ -170,15 +172,16 @@ function GroupEditor({
 
       <div className="flex items-center justify-between">
         <Button variant="ghost" className="text-rose-600 hover:bg-rose-50" onClick={onDelete}>
-          <Trash2 size={16} /> Delete group
+          <Trash2 size={16} /> {t("cp.groups.deleteGroup")}
         </Button>
-        <Button loading={busy} onClick={save} disabled={members === null}>Save changes</Button>
+        <Button loading={busy} onClick={save} disabled={members === null}>{t("common.saveChanges")}</Button>
       </div>
     </div>
   );
 }
 
 function CreateGroupForm({ onDone }: { onDone: () => void }) {
+  const t = useT();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -191,10 +194,10 @@ function CreateGroupForm({ onDone }: { onDone: () => void }) {
     setError(null);
     try {
       await api.post("/admin/groups", { name, description });
-      push({ level: "success", title: "Group created", body: `Grant "${name}" access in Shared Folders.` });
+      push({ level: "success", title: t("cp.groups.created"), body: t("cp.groups.createdBody", { name }) });
       onDone();
     } catch (err) {
-      setError(err instanceof ApiRequestError ? err.message : "Failed to create the group.");
+      setError(err instanceof ApiRequestError ? err.message : t("cp.groups.createFailed"));
     } finally {
       setBusy(false);
     }
@@ -203,19 +206,19 @@ function CreateGroupForm({ onDone }: { onDone: () => void }) {
   return (
     <form onSubmit={submit} className="mb-4 space-y-3 rounded-xl bg-slate-50 p-4 ring-1 ring-slate-200/70">
       <div className="grid gap-3 sm:grid-cols-2">
-        <Field label="Group name" hint="Letters, digits, dot, dash or underscore">
-          <Input value={name} onChange={(e) => setName(e.target.value.replace(/\s/g, ""))} placeholder="editors" autoFocus />
+        <Field label={t("cp.groups.groupName")} hint={t("cp.groups.groupNameHint")}>
+          <Input value={name} onChange={(e) => setName(e.target.value.replace(/\s/g, ""))} placeholder={t("cp.groups.groupNamePlaceholder")} autoFocus />
         </Field>
-        <Field label="Description (optional)">
-          <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="People who can edit the media library" />
+        <Field label={t("cp.groups.descriptionOptional")}>
+          <Input value={description} onChange={(e) => setDescription(e.target.value)} placeholder={t("cp.groups.createDescriptionPlaceholder")} />
         </Field>
       </div>
       {error && <p className="text-sm text-rose-600">{error}</p>}
       <div className="flex gap-2">
         <Button type="submit" loading={busy} disabled={name.trim().length < 2}>
-          <UserPlus size={16} /> Create group
+          <UserPlus size={16} /> {t("cp.groups.createGroup")}
         </Button>
-        <Button type="button" variant="ghost" onClick={onDone}>Cancel</Button>
+        <Button type="button" variant="ghost" onClick={onDone}>{t("common.cancel")}</Button>
       </div>
     </form>
   );

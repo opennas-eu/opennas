@@ -4,6 +4,8 @@ import type { AutologinResponse } from "@opennas/shared";
 import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { Button, Input, Select, Toggle } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
+import { fillElements } from "./fillElements.tsx";
 
 /**
  * Signing in automatically from a known network.
@@ -15,6 +17,7 @@ import { Button, Input, Select, Toggle } from "../../ui/controls.tsx";
  * told that admins are excluded on purpose, not left wondering if it's a bug.
  */
 export function Autologin() {
+  const t = useT();
   const [data, setData] = useState<AutologinResponse | null>(null);
   const [enabled, setEnabled] = useState(false);
   const [userId, setUserId] = useState("");
@@ -59,14 +62,14 @@ export function Autologin() {
       );
       push({
         level: "success",
-        title: "Saved",
-        body: enabled ? "Automatic sign-in is on for those networks." : "Automatic sign-in is off.",
+        title: t("cp.saved"),
+        body: enabled ? t("cp.autologin.savedOn") : t("cp.autologin.savedOff"),
       });
     } catch (err) {
       push({
         level: "warning",
-        title: "Couldn't save that",
-        body: err instanceof ApiRequestError ? err.message : "Failed.",
+        title: t("cp.autologin.saveFailed"),
+        body: err instanceof ApiRequestError ? err.message : t("cp.failed"),
       });
     } finally {
       setSaving(false);
@@ -84,21 +87,20 @@ export function Autologin() {
           <MonitorSmartphone size={17} />
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-ink-soft">Sign in automatically from a trusted console</div>
+          <div className="text-sm font-medium text-ink-soft">{t("cp.autologin.title")}</div>
           <div className="text-xs text-ink-faint">
-            For a screen on a wall. A browser on one of these networks lands on the desktop with no password at all -
-            so only name networks where that is what you want.
+            {t("cp.autologin.hint")}
           </div>
         </div>
-        <Toggle checked={enabled} onChange={setEnabled} label="Sign in automatically" />
+        <Toggle checked={enabled} onChange={setEnabled} label={t("cp.autologin.toggle")} />
       </div>
 
       {enabled && (
         <div className="mt-3 space-y-3 border-t border-slate-200 pt-3">
           <div>
-            <label className="mb-1 block text-xs font-medium text-ink-soft">Sign in as</label>
+            <label className="mb-1 block text-xs font-medium text-ink-soft">{t("cp.autologin.signInAs")}</label>
             <Select value={userId} onChange={(e) => setUserId(e.target.value)} className="h-9 w-full py-0">
-              <option value="">Choose an account...</option>
+              <option value="">{t("cp.autologin.chooseAccount")}</option>
               {eligible.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.displayName} (@{c.username})
@@ -107,14 +109,14 @@ export function Autologin() {
             </Select>
             {eligible.length === 0 && (
               <p className="mt-1 text-xs text-amber-700">
-                No eligible accounts. Create a regular user without two-factor authentication to use automatic sign-in.
+                {t("cp.autologin.noEligible")}
               </p>
             )}
             {blocked.length > 0 && (
               <ul className="mt-1.5 space-y-0.5">
                 {blocked.map((c) => (
                   <li key={c.id} className="text-[11px] text-ink-faint">
-                    <span className="font-medium">@{c.username}</span> can't be used - {c.reason}
+                    {fillElements(t("cp.autologin.cantUse", { reason: c.reason }), { user: <span className="font-medium">@{c.username}</span> })}
                   </li>
                 ))}
               </ul>
@@ -122,7 +124,7 @@ export function Autologin() {
           </div>
 
           <div>
-            <label className="mb-1 block text-xs font-medium text-ink-soft">Only from these networks</label>
+            <label className="mb-1 block text-xs font-medium text-ink-soft">{t("cp.autologin.networks")}</label>
             <div className="flex flex-wrap gap-1.5">
               {networks.map((n) => (
                 <span
@@ -133,7 +135,7 @@ export function Autologin() {
                   <button
                     type="button"
                     className="text-ink-faint hover:text-rose-600"
-                    aria-label={`Remove ${n}`}
+                    aria-label={t("cp.autologin.removeNetwork", { network: n })}
                     onClick={() => setNetworks((cur) => cur.filter((x) => x !== n))}
                   >
                     <X size={11} />
@@ -142,7 +144,7 @@ export function Autologin() {
               ))}
               {networks.length === 0 && (
                 <span className="text-[11px] text-amber-700">
-                  Add at least one address or range to restrict who can sign in automatically.
+                  {t("cp.autologin.addOne")}
                 </span>
               )}
             </div>
@@ -160,12 +162,11 @@ export function Autologin() {
                 className="h-8 flex-1 text-xs"
               />
               <Button variant="secondary" className="h-8 px-2 text-xs" onClick={addNetwork}>
-                <Plus size={13} /> Add
+                <Plus size={13} /> {t("common.add")}
               </Button>
             </div>
             <p className="mt-1 text-[11px] text-ink-faint">
-              One machine is <code className="rounded bg-white px-1 py-px font-mono">/32</code> - narrower is safer
-              than a whole subnet. Loopback can't be used: every visitor arrives through it.
+              {fillElements(t("cp.autologin.cidrHint"), { cidr: <code className="rounded bg-white px-1 py-px font-mono">/32</code> })}
             </p>
           </div>
         </div>
@@ -173,9 +174,9 @@ export function Autologin() {
 
       <div className="mt-3 flex items-center gap-2">
         <Button className="h-8 px-3 text-xs" loading={saving} onClick={() => void save()}>
-          Save
+          {t("common.save")}
         </Button>
-        <span className="text-[11px] text-ink-faint">Changing this signs out every console it had signed in.</span>
+        <span className="text-[11px] text-ink-faint">{t("cp.autologin.changeHint")}</span>
       </div>
     </div>
   );

@@ -3,10 +3,12 @@ import { HardDrive, ShieldCheck, User as UserIcon } from "lucide-react";
 import type { MeResponse, SetupRequest } from "@opennas/shared";
 import { api, ApiRequestError } from "../../lib/api.ts";
 import { useAuth } from "../../store/auth.ts";
+import { useT } from "../../i18n/index.ts";
 import { Logo } from "../Logo.tsx";
 import { Button, Field, Input } from "../ui/controls.tsx";
 
 export function SetupWizard() {
+  const t = useT();
   const setSession = useAuth((s) => s.setSession);
   const defaultName = useAuth((s) => s.bootstrap?.instanceName ?? "OpenNAS");
 
@@ -27,10 +29,10 @@ export function SetupWizard() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     const local: Record<string, string> = {};
-    if (form.password.length < 8) local.password = "At least 8 characters.";
-    if (form.password !== confirm) local.confirm = "Passwords do not match.";
-    if (!form.username.trim()) local.username = "Required.";
-    if (!form.displayName.trim()) local.displayName = "Required.";
+    if (form.password.length < 8) local.password = t("ui.setup.passwordTooShort");
+    if (form.password !== confirm) local.confirm = t("ui.setup.passwordMismatch");
+    if (!form.username.trim()) local.username = t("ui.setup.required");
+    if (!form.displayName.trim()) local.displayName = t("ui.setup.required");
     setErrors(local);
     if (Object.keys(local).length) return;
 
@@ -42,7 +44,7 @@ export function SetupWizard() {
       if (err instanceof ApiRequestError) {
         setErrors(err.fields ?? { _: err.message });
       } else {
-        setErrors({ _: "Something went wrong. Please try again." });
+        setErrors({ _: t("ui.setup.failed") });
       }
     } finally {
       setBusy(false);
@@ -58,17 +60,17 @@ export function SetupWizard() {
             <Logo size={44} withWordmark />
             <div className="space-y-4">
               <h1 className="text-2xl font-bold leading-tight">
-                Let's set up
+                {t("ui.setup.headline1")}
                 <br />
-                your NAS.
+                {t("ui.setup.headline2")}
               </h1>
               <ul className="space-y-3 text-sm text-white/85">
-                <Bullet icon={<UserIcon size={16} />}>Create your administrator account</Bullet>
-                <Bullet icon={<ShieldCheck size={16} />}>Add a passkey afterwards for fast, secure sign-in</Bullet>
-                <Bullet icon={<HardDrive size={16} />}>Then explore your new desktop</Bullet>
+                <Bullet icon={<UserIcon size={16} />}>{t("ui.setup.bulletAccount")}</Bullet>
+                <Bullet icon={<ShieldCheck size={16} />}>{t("ui.setup.bulletPasskey")}</Bullet>
+                <Bullet icon={<HardDrive size={16} />}>{t("ui.setup.bulletExplore")}</Bullet>
               </ul>
             </div>
-            <p className="text-xs text-white/60">OpenNAS - first-run setup</p>
+            <p className="text-xs text-white/60">{t("ui.setup.footer")}</p>
           </aside>
 
           {/* Right - the form */}
@@ -77,29 +79,29 @@ export function SetupWizard() {
               <Logo size={36} withWordmark className="[&_span]:text-ink" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold text-ink">Administrator account</h2>
-              <p className="text-sm text-ink-faint">This account has full control over OpenNAS.</p>
+              <h2 className="text-lg font-semibold text-ink">{t("ui.setup.title")}</h2>
+              <p className="text-sm text-ink-faint">{t("ui.setup.subtitle")}</p>
             </div>
 
-            <Field label="Server name" hint="Shown across the desktop and login screen.">
+            <Field label={t("ui.setup.serverName")} hint={t("ui.setup.serverNameHint")}>
               <Input
                 value={form.instanceName}
                 onChange={(e) => update("instanceName", e.target.value)}
-                placeholder="e.g. Fujitsu Vault"
+                placeholder={t("ui.setup.serverNamePlaceholder")}
                 autoComplete="off"
               />
             </Field>
 
             <div className="grid grid-cols-2 gap-3">
-              <Field label="Display name" error={errors.displayName}>
+              <Field label={t("ui.setup.displayName")} error={errors.displayName}>
                 <Input
                   value={form.displayName}
                   onChange={(e) => update("displayName", e.target.value)}
-                  placeholder="Name"
+                  placeholder={t("common.name")}
                   autoComplete="Last name"
                 />
               </Field>
-              <Field label="Username" error={errors.username}>
+              <Field label={t("auth.username")} error={errors.username}>
                 <Input
                   value={form.username}
                   onChange={(e) => update("username", e.target.value.replace(/\s/g, ""))}
@@ -109,16 +111,16 @@ export function SetupWizard() {
               </Field>
             </div>
 
-            <Field label="Password" error={errors.password}>
+            <Field label={t("auth.password")} error={errors.password}>
               <Input
                 type="password"
                 value={form.password}
                 onChange={(e) => update("password", e.target.value)}
-                placeholder="At least 8 characters"
+                placeholder={t("ui.setup.passwordPlaceholder")}
                 autoComplete="new-password"
               />
             </Field>
-            <Field label="Confirm password" error={errors.confirm}>
+            <Field label={t("ui.setup.confirmPassword")} error={errors.confirm}>
               <Input
                 type="password"
                 value={confirm}
@@ -130,7 +132,7 @@ export function SetupWizard() {
             {errors._ && <p className="text-sm text-rose-600">{errors._}</p>}
 
             <Button type="submit" loading={busy} className="w-full">
-              Create account & enter OpenNAS
+              {t("ui.setup.submit")}
             </Button>
           </form>
         </div>

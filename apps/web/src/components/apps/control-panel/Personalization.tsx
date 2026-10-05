@@ -10,14 +10,16 @@ import { useNotifications } from "../../../store/notifications.ts";
 import { confirmDialog } from "../../../store/dialogs.ts";
 import { WALLPAPERS } from "../../../lib/wallpapers.ts";
 import { ACCENTS } from "../../../lib/accents.ts";
+import { useT, type MessageKey } from "../../../i18n/index.ts";
 
-const MODES: { id: ThemeMode; name: string; icon: typeof Sun }[] = [
-  { id: "light", name: "Light", icon: Sun },
-  { id: "dark", name: "Dark", icon: Moon },
-  { id: "system", name: "System", icon: Monitor },
+const MODES: { id: ThemeMode; name: MessageKey; icon: typeof Sun }[] = [
+  { id: "light", name: "cp.personalization.light", icon: Sun },
+  { id: "dark", name: "cp.personalization.dark", icon: Moon },
+  { id: "system", name: "cp.system", icon: Monitor },
 ];
 
 export function Personalization() {
+  const t = useT();
   const wallpaper = usePrefs((s) => s.preferences.wallpaper);
   const accent = usePrefs((s) => s.preferences.accent);
   const theme = usePrefs((s) => s.preferences.theme);
@@ -40,7 +42,7 @@ export function Personalization() {
 
   async function installTheme(file: File) {
     if (!/\.onthm$|\.zip$/i.test(file.name)) {
-      push({ level: "warning", title: "Not a theme", body: "Choose a .onthm theme file." });
+      push({ level: "warning", title: t("cp.personalization.notATheme"), body: t("cp.personalization.chooseOnthm") });
       return;
     }
     setBusy(true);
@@ -49,43 +51,43 @@ export function Personalization() {
       fd.append("file", file, file.name);
       const res = await fetch(apiUrl("/themes/install"), { method: "POST", body: fd, credentials: "include" });
       const body = await res.json().catch(() => null);
-      if (!res.ok) throw new Error((body as { message?: string })?.message ?? "Install failed.");
+      if (!res.ok) throw new Error((body as { message?: string })?.message ?? t("cp.personalization.installFailedBody"));
       await loadThemes();
-      push({ level: "success", title: "Theme installed", body: `"${(body as { theme: InstalledTheme }).theme.name}" is ready to apply.` });
+      push({ level: "success", title: t("cp.personalization.installed"), body: t("cp.personalization.readyToApply", { name: (body as { theme: InstalledTheme }).theme.name }) });
     } catch (err) {
-      push({ level: "warning", title: "Couldn't install theme", body: err instanceof Error ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.personalization.installFailed"), body: err instanceof Error ? err.message : t("cp.failed") });
     } finally {
       setBusy(false);
     }
   }
 
-  async function uninstallTheme(t: InstalledTheme) {
-    if (!(await confirmDialog({ title: `Remove "${t.name}"?`, message: "The theme is removed for everyone. Anyone using it falls back to the default look.", confirmLabel: "Remove", danger: true }))) return;
+  async function uninstallTheme(th: InstalledTheme) {
+    if (!(await confirmDialog({ title: t("cp.personalization.removeConfirm", { name: th.name }), message: t("cp.personalization.removeMessage"), confirmLabel: t("common.remove"), danger: true }))) return;
     try {
-      await api.del(`/themes/${t.id}`);
-      if (themeId === t.id) await update({ themeId: "" });
+      await api.del(`/themes/${th.id}`);
+      if (themeId === th.id) await update({ themeId: "" });
       await loadThemes();
-      push({ level: "success", title: "Theme removed", body: t.name });
+      push({ level: "success", title: t("cp.personalization.removed"), body: th.name });
     } catch (err) {
-      push({ level: "warning", title: "Couldn't remove theme", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("cp.personalization.removeFailed"), body: err instanceof ApiRequestError ? err.message : t("cp.failed") });
     }
   }
 
   return (
     <div>
       <div className="mb-5">
-        <h2 className="text-lg font-semibold text-ink">Personalization</h2>
-        <p className="text-sm text-ink-faint">Make this desktop yours. Changes apply instantly.</p>
+        <h2 className="text-lg font-semibold text-ink">{t("cp.personalization")}</h2>
+        <p className="text-sm text-ink-faint">{t("cp.personalization.subtitle")}</p>
       </div>
 
       {/* Custom themes */}
       <section className="mb-7">
         <div className="mb-3 flex items-center gap-2">
-          <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink-soft"><Palette size={15} /> Themes</h3>
+          <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink-soft"><Palette size={15} /> {t("cp.personalization.themes")}</h3>
           <span className="flex-1" />
           {isAdmin && (
             <button onClick={() => fileInput.current?.click()} disabled={busy} className="inline-flex items-center gap-1.5 rounded-lg bg-slate-100 px-2.5 py-1.5 text-xs font-medium text-ink-soft transition hover:bg-slate-200 disabled:opacity-50">
-              <Upload size={13} /> {busy ? "Installing..." : "Install .onthm"}
+              <Upload size={13} /> {busy ? t("cp.personalization.installing") : t("cp.personalization.install")}
             </button>
           )}
           <input ref={fileInput} type="file" accept=".onthm,.zip" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) void installTheme(f); e.target.value = ""; }} />
@@ -96,54 +98,54 @@ export function Personalization() {
             onClick={() => void update({ themeId: "" })}
             className={clsx("group relative aspect-video overflow-hidden rounded-xl ring-2 transition", !usingCustom ? "ring-brand-500" : "ring-transparent hover:ring-slate-300")}
             style={{ background: WALLPAPERS[0]?.background }}
-            title="Default look"
+            title={t("cp.personalization.defaultLook")}
           >
             {!usingCustom && <Badge />}
-            <Label>Default</Label>
+            <Label>{t("cp.personalization.default")}</Label>
           </button>
-          {themes.map((t) => (
+          {themes.map((th) => (
             <button
-              key={t.id}
-              onClick={() => void update({ themeId: t.id, theme: t.mode })}
-              className={clsx("group relative aspect-video overflow-hidden rounded-xl ring-2 transition", themeId === t.id ? "ring-brand-500" : "ring-transparent hover:ring-slate-300")}
-              style={{ background: t.wallpaper }}
-              title={t.description || t.name}
+              key={th.id}
+              onClick={() => void update({ themeId: th.id, theme: th.mode })}
+              className={clsx("group relative aspect-video overflow-hidden rounded-xl ring-2 transition", themeId === th.id ? "ring-brand-500" : "ring-transparent hover:ring-slate-300")}
+              style={{ background: th.wallpaper }}
+              title={th.description || th.name}
             >
-              {themeId === t.id && <Badge />}
-              <span className="absolute left-1.5 top-1.5 h-4 w-4 rounded-full ring-2 ring-white/70" style={{ backgroundColor: t.accent["600"] }} />
+              {themeId === th.id && <Badge />}
+              <span className="absolute left-1.5 top-1.5 h-4 w-4 rounded-full ring-2 ring-white/70" style={{ backgroundColor: th.accent["600"] }} />
               {isAdmin && (
                 <span
                   role="button"
-                  onClick={(e) => { e.stopPropagation(); void uninstallTheme(t); }}
+                  onClick={(e) => { e.stopPropagation(); void uninstallTheme(th); }}
                   className="absolute right-1.5 top-1.5 hidden h-5 w-5 place-items-center rounded-full bg-black/50 text-white group-hover:grid hover:bg-rose-500"
-                  title="Remove theme"
+                  title={t("cp.personalization.removeTheme")}
                 >
                   <Trash2 size={11} />
                 </span>
               )}
-              <Label>{t.name}</Label>
+              <Label>{th.name}</Label>
             </button>
           ))}
         </div>
         {themes.length === 0 && (
-          <p className="mt-2 text-xs text-ink-faint">No custom themes installed. {isAdmin ? "Install a .onthm above." : "An admin can install themes."}</p>
+          <p className="mt-2 text-xs text-ink-faint">{isAdmin ? t("cp.personalization.noThemesAdmin") : t("cp.personalization.noThemes")}</p>
         )}
       </section>
 
       {/* Mode */}
       <section className="mb-7">
-        <h3 className="mb-3 text-sm font-semibold text-ink-soft">Mode</h3>
+        <h3 className="mb-3 text-sm font-semibold text-ink-soft">{t("cp.personalization.mode")}</h3>
         <div className="flex flex-wrap gap-2.5">
-          {MODES.map((t) => {
-            const TIcon = t.icon;
-            const active = theme === t.id;
+          {MODES.map((m) => {
+            const TIcon = m.icon;
+            const active = theme === m.id;
             return (
               <button
-                key={t.id}
-                onClick={() => void update({ theme: t.id })}
+                key={m.id}
+                onClick={() => void update({ theme: m.id })}
                 className={clsx("flex items-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium ring-1 transition", active ? "bg-brand-600 text-white ring-brand-600" : "bg-slate-50 text-ink-soft ring-slate-200 hover:bg-slate-100")}
               >
-                <TIcon size={16} /> {t.name}
+                <TIcon size={16} /> {t(m.name)}
               </button>
             );
           })}
@@ -152,7 +154,7 @@ export function Personalization() {
 
       {/* Wallpaper */}
       <section className="mb-7">
-        <h3 className="mb-3 text-sm font-semibold text-ink-soft">Wallpaper {usingCustom && <span className="font-normal text-ink-faint">- overridden by your theme</span>}</h3>
+        <h3 className="mb-3 text-sm font-semibold text-ink-soft">{t("cp.personalization.wallpaper")} {usingCustom && <span className="font-normal text-ink-faint">- {t("cp.personalization.overridden")}</span>}</h3>
         <div className={clsx("grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4", usingCustom && "opacity-50")}>
           {WALLPAPERS.map((w) => (
             <button
@@ -171,7 +173,7 @@ export function Personalization() {
 
       {/* Accent */}
       <section>
-        <h3 className="mb-3 text-sm font-semibold text-ink-soft">Accent color {usingCustom && <span className="font-normal text-ink-faint">- overridden by your theme</span>}</h3>
+        <h3 className="mb-3 text-sm font-semibold text-ink-soft">{t("cp.personalization.accent")} {usingCustom && <span className="font-normal text-ink-faint">- {t("cp.personalization.overridden")}</span>}</h3>
         <div className={clsx("flex flex-wrap gap-2.5", usingCustom && "opacity-50")}>
           {ACCENTS.map((a) => {
             const on = !usingCustom && accent.toLowerCase() === a.value.toLowerCase();

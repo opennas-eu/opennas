@@ -1,5 +1,6 @@
 import type { ComponentType } from "react";
 import type { AppProps } from "./types.ts";
+import { useT } from "../../i18n/index.ts";
 import { SystemMonitor } from "./SystemMonitor.tsx";
 import { ControlPanel } from "./ControlPanel.tsx";
 import { PackageCenter } from "./PackageCenter.tsx";
@@ -31,9 +32,10 @@ export const APP_COMPONENTS: Record<string, ComponentType<AppProps>> = {
 };
 
 export function UnknownApp() {
+  const t = useT();
   return (
     <div className="grid h-full place-items-center p-8 text-center text-sm text-ink-faint">
-      This app isn't available yet.
+      {t("app.registry.unavailable")}
     </div>
   );
 }

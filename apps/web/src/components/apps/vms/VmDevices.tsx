@@ -5,6 +5,7 @@ import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { confirmDialog } from "../../../store/dialogs.ts";
 import { Button, Select } from "../../ui/controls.tsx";
+import { useT } from "../../../i18n/index.ts";
 
 /**
  * Handing a physical device to a VM.
@@ -27,6 +28,7 @@ export function VmDevices({ vm }: { vm: VmInfo }) {
   const [pick, setPick] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const push = useNotifications((s) => s.push);
+  const t = useT();
 
   const load = useCallback(async () => {
     const [h, a] = await Promise.all([
@@ -39,7 +41,7 @@ export function VmDevices({ vm }: { vm: VmInfo }) {
 
   useEffect(() => { void load(); }, [load]);
 
-  if (host === null) return <p className="text-xs text-ink-faint">Loading devices...</p>;
+  if (host === null) return <p className="text-xs text-ink-faint">{t("app.vms.loadingDevices")}</p>;
 
   const attachedIds = new Set(attached.map((d) => `${d.kind}:${d.id.toLowerCase()}`));
   const all = [...host.usb, ...host.pci];
@@ -53,26 +55,25 @@ export function VmDevices({ vm }: { vm: VmInfo }) {
     if (!selected) return;
     const companions = selected.groupMembers;
     const ok = await confirmDialog({
-      title: `Pass ${selected.description} to ${vm.name}?`,
-      message:
-        (selected.kind === "pci"
-          ? "The host gives this device up while the VM is defined to use it - it will disappear from the NAS itself. "
-          : "The VM gets this USB device whenever it is plugged in; the host stops using it. ") +
-        (companions.length > 0
-          ? `Everything in IOMMU group ${selected.iommuGroup} moves together, so ${companions.join(", ")} ${companions.length === 1 ? "goes" : "go"} as well. `
-          : "") +
-        "The VM has to be restarted before it takes effect.",
-      confirmLabel: "Pass through",
+      title: t("app.vms.passConfirm", { device: selected.description, vm: vm.name }),
+      message: [
+        t(selected.kind === "pci" ? "app.vms.passPciBody" : "app.vms.passUsbBody"),
+        companions.length > 0
+          ? t("app.vms.passGroupBody", { group: String(selected.iommuGroup), devices: companions.join(", "), count: companions.length })
+          : null,
+        t("app.vms.passRestartBody"),
+      ].filter(Boolean).join(" "),
+      confirmLabel: t("app.vms.passThrough"),
     });
     if (!ok) return;
     setBusy("attach");
     try {
       await api.post(`/vms/${vm.name}/devices`, { kind: selected.kind, id: selected.id });
       setPick("");
-      push({ level: "success", title: "Device attached", body: `${selected.description} → ${vm.name}. Restart the VM to use it.` });
+      push({ level: "success", title: t("app.vms.deviceAttached"), body: t("app.vms.deviceAttachedBody", { device: selected.description, vm: vm.name }) });
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't attach the device", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.vms.attachFailed"), body: err instanceof ApiRequestError ? err.message : t("common.failed") });
     } finally {
       setBusy(null);
     }
@@ -82,10 +83,10 @@ export function VmDevices({ vm }: { vm: VmInfo }) {
     setBusy(d.id);
     try {
       await api.del(`/vms/${vm.name}/devices/${d.kind}/${encodeURIComponent(d.id)}`);
-      push({ level: "success", title: "Device detached", body: "Restart the VM to release it fully." });
+      push({ level: "success", title: t("app.vms.deviceDetached"), body: t("app.vms.deviceDetachedBody") });
       await load();
     } catch (err) {
-      push({ level: "warning", title: "Couldn't detach the device", body: err instanceof ApiRequestError ? err.message : "Failed." });
+      push({ level: "warning", title: t("app.vms.detachFailed"), body: err instanceof ApiRequestError ? err.message : t("common.failed") });
     } finally {
       setBusy(null);
     }
@@ -107,7 +108,7 @@ export function VmDevices({ vm }: { vm: VmInfo }) {
               <button
                 onClick={() => void detach(d)}
                 disabled={busy === d.id}
-                title="Detach"
+                title={t("app.vms.detach")}
                 className="grid h-7 w-7 place-items-center rounded-md text-ink-soft transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
               >
                 <Unplug size={14} />
@@ -119,34 +120,33 @@ export function VmDevices({ vm }: { vm: VmInfo }) {
 
       <div className="flex flex-wrap items-center gap-2">
         <Select value={pick} onChange={(e) => setPick(e.target.value)} className="h-8 max-w-xs flex-1 py-0 text-xs">
-          <option value="">{available.length > 0 ? "Choose a USB device..." : "No USB devices available"}</option>
+          <option value="">{available.length > 0 ? t("app.vms.chooseUsb") : t("app.vms.noUsb")}</option>
           {available.map((d) => (
             <option key={d.id} value={`usb:${d.id}`}>{d.description} ({d.id})</option>
           ))}
         </Select>
         <Button className="h-8 px-3 text-xs" loading={busy === "attach"} disabled={!selected} onClick={() => void attach()}>
-          <Plug size={13} /> Pass through
+          <Plug size={13} /> {t("app.vms.passThrough")}
         </Button>
       </div>
 
       <div className="rounded-lg bg-slate-50 p-2.5 ring-1 ring-slate-200/70 opacity-70">
         <p className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-ink-soft">
           <Construction size={12} className="shrink-0" />
-          PCI passthrough - work in progress
+          {t("app.vms.pciWip")}
         </p>
         <p className="text-[11px] text-ink-faint">
-          Graphics cards and other PCI devices can't be attached yet - it works, but hasn't been proven on real
-          hardware, so it stays off rather than half-working.
+          {t("app.vms.pciWipBody")}{" "}
           {host.status.iommuActive
-            ? ` This machine has an active IOMMU with ${host.status.iommuGroups} groups, and ${pciEligible.length} of ${host.pci.length} PCI devices would be candidates.`
-            : ` ${host.status.reason}`}
+            ? t("app.vms.pciIommu", { groups: host.status.iommuGroups, eligible: pciEligible.length, count: host.pci.length })
+            : host.status.reason}
         </p>
         {pciEligible.length > 0 && (
           <ul className="mt-1.5 space-y-0.5">
             {pciEligible.map((d) => (
               <li key={d.id} className="text-[11px] text-ink-faint">
                 <span className="font-mono">{d.id}</span> {d.description}
-                {d.iommuGroup !== null && ` - group ${d.iommuGroup}`}
+                {d.iommuGroup !== null && ` - ${t("app.vms.iommuGroupShort", { group: d.iommuGroup })}`}
               </li>
             ))}
           </ul>
@@ -155,15 +155,14 @@ export function VmDevices({ vm }: { vm: VmInfo }) {
 
       {selected && selected.groupMembers.length > 0 && (
         <p className="rounded-lg bg-slate-50 px-2.5 py-1.5 text-[11px] text-ink-faint ring-1 ring-slate-200/70">
-          IOMMU group {selected.iommuGroup} also holds {selected.groupMembers.join(", ")}. They move to the VM together -
-          that's normal for a graphics card, which brings its audio and USB functions with it.
+          {t("app.vms.groupNote", { group: String(selected.iommuGroup), devices: selected.groupMembers.join(", ") })}
         </p>
       )}
 
       {blocked.length > 0 && (
         <details className="text-[11px] text-ink-faint">
           <summary className="cursor-pointer select-none">
-            {blocked.length} PCI {blocked.length === 1 ? "device isn't" : "devices aren't"} available for passthrough
+            {t("app.vms.pciBlocked", { count: blocked.length })}
           </summary>
           <ul className="mt-1.5 space-y-1 pl-1">
             {blocked.map((d) => (

@@ -3,6 +3,7 @@ import { HardDrive } from "lucide-react";
 import type { StorageTarget, StorageTargetsResponse } from "@opennas/shared";
 import { api } from "../../lib/api.ts";
 import { Select } from "./controls.tsx";
+import { useT } from "../../i18n/index.ts";
 
 /**
  * "Where should this live?" for anything that allocates real storage.
@@ -18,7 +19,7 @@ import { Select } from "./controls.tsx";
 export function StorageTargetField({
   value,
   onChange,
-  label = "Store on",
+  label,
   hint,
 }: {
   value: string;
@@ -26,6 +27,7 @@ export function StorageTargetField({
   label?: string;
   hint?: string;
 }) {
+  const t = useT();
   const [targets, setTargets] = useState<StorageTarget[] | null>(null);
 
   useEffect(() => {
@@ -37,15 +39,15 @@ export function StorageTargetField({
 
   if (!targets || targets.length <= 1) return null;
 
-  const selected = targets.find((t) => t.label === value) ?? targets[0]!;
+  const selected = targets.find((target) => target.label === value) ?? targets[0]!;
 
   return (
     <label className="block">
-      <span className="mb-1 block text-sm font-medium text-ink-soft">{label}</span>
+      <span className="mb-1 block text-sm font-medium text-ink-soft">{label ?? t("ui.storageTarget.label")}</span>
       <Select value={value} onChange={(e) => onChange(e.target.value)} className="w-full">
-        {targets.map((t) => (
-          <option key={t.label || "__default"} value={t.label}>
-            {t.label ? `Volume: ${t.name}` : "Default location"}
+        {targets.map((target) => (
+          <option key={target.label || "__default"} value={target.label}>
+            {target.label ? t("ui.storageTarget.volume", { name: target.name }) : t("ui.storageTarget.default")}
           </option>
         ))}
       </Select>

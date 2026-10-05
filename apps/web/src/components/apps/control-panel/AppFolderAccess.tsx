@@ -4,6 +4,7 @@ import type { UserAppGrant, UserAppGrantsResponse } from "@opennas/shared";
 import { api, ApiRequestError } from "../../../lib/api.ts";
 import { useNotifications } from "../../../store/notifications.ts";
 import { confirmDialog } from "../../../store/dialogs.ts";
+import { useT } from "../../../i18n/index.ts";
 
 /**
  * Folders this user has handed to apps.
@@ -14,6 +15,7 @@ import { confirmDialog } from "../../../store/dialogs.ts";
  * different folders, and neither should see the other's.
  */
 export function AppFolderAccess() {
+  const t = useT();
   const [grants, setGrants] = useState<UserAppGrant[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const push = useNotifications((s) => s.push);
@@ -26,9 +28,9 @@ export function AppFolderAccess() {
 
   async function revoke(g: UserAppGrant) {
     const ok = await confirmDialog({
-      title: `Stop ${g.appName} using ${g.name}?`,
-      message: `It will lose access to ${g.path} immediately. Nothing in the folder is deleted, and you can grant it again from inside the app.`,
-      confirmLabel: "Revoke",
+      title: t("cp.appAccess.revokeConfirm", { app: g.appName, folder: g.name }),
+      message: t("cp.appAccess.revokeMessage", { path: g.path }),
+      confirmLabel: t("cp.appAccess.revoke"),
       danger: true,
     });
     if (!ok) return;
@@ -38,8 +40,8 @@ export function AppFolderAccess() {
     } catch (err) {
       push({
         level: "warning",
-        title: "Couldn't revoke that",
-        body: err instanceof ApiRequestError ? err.message : "Failed.",
+        title: t("cp.appAccess.revokeFailed"),
+        body: err instanceof ApiRequestError ? err.message : t("cp.failed"),
       });
     } finally {
       setBusy(null);
@@ -60,16 +62,15 @@ export function AppFolderAccess() {
   return (
     <section className="mb-6">
       <h3 className="mb-1 flex items-center gap-2 text-sm font-semibold text-ink-soft">
-        <FolderOpen size={15} /> Folders you've given to apps
+        <FolderOpen size={15} /> {t("cp.appAccess.title")}
       </h3>
       <p className="mb-2 text-xs text-ink-faint">
-        When an app asks for a folder, OpenNAS shows you the picker and the app only ever gets what you chose. Nothing
-        here can give an app more than you have yourself - if you lose access to a shared folder, so does it.
+        {t("cp.appAccess.hint")}
       </p>
 
       {grants.length === 0 ? (
         <p className="rounded-lg bg-slate-50 px-3 py-2 text-xs text-ink-faint ring-1 ring-slate-200/70">
-          No app has been given a folder.
+          {t("cp.appAccess.empty")}
         </p>
       ) : (
         <div className="space-y-3">
@@ -79,7 +80,7 @@ export function AppFolderAccess() {
                 <span className="text-xs font-semibold text-ink-soft">{list[0]!.appName}</span>
                 {!list[0]!.appInstalled && (
                   <span className="rounded-full bg-slate-200 px-1.5 py-px text-[10px] font-medium text-ink-faint">
-                    no longer installed
+                    {t("cp.appAccess.notInstalled")}
                   </span>
                 )}
               </div>
@@ -90,16 +91,16 @@ export function AppFolderAccess() {
                       <span className="block truncate font-mono text-xs text-ink-soft">{g.path}</span>
                       <span className="flex items-center gap-1 text-[11px] text-ink-faint">
                         {g.mode === "readwrite" ? <Pencil size={10} /> : <ShieldCheck size={10} />}
-                        {g.mode === "readwrite" ? "can read and change" : "can read only"}
+                        {g.mode === "readwrite" ? t("cp.appAccess.canChange") : t("cp.appAccess.canRead")}
                         {g.lastUsedAt
-                          ? ` - last used ${new Date(g.lastUsedAt).toLocaleDateString()}`
-                          : " - never used"}
+                          ? ` - ${t("cp.appAccess.lastUsed", { date: new Date(g.lastUsedAt).toLocaleDateString() })}`
+                          : ` - ${t("cp.appAccess.neverUsed")}`}
                       </span>
                     </div>
                     <button
                       onClick={() => void revoke(g)}
                       disabled={busy === g.handle}
-                      title="Revoke access"
+                      title={t("cp.appAccess.revokeAccess")}
                       className="grid h-7 w-7 shrink-0 place-items-center rounded-md text-ink-soft transition hover:bg-rose-50 hover:text-rose-600 disabled:opacity-50"
                     >
                       <Trash2 size={14} />
